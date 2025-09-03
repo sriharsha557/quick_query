@@ -1,8 +1,12 @@
 import streamlit as st
 import tempfile
 import os
-__import__('pysqlite3')
-sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+try:
+    import pysqlite3  # modern sqlite
+    sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+except ImportError:
+    # fallback: use built-in sqlite3 if available
+    import sqlite3
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 from datetime import datetime
@@ -873,4 +877,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
