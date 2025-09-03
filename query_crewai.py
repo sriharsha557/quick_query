@@ -6,22 +6,22 @@ from dataclasses import dataclass
 from datetime import datetime
 import base64
 import io
+import pickle
 from dotenv import load_dotenv
 
 # CrewAI and LLM imports
 from crewai import Agent, Task, Crew, Process
 from crewai.tools import BaseTool
 from langchain_groq import ChatGroq
-from langchain.embeddings import HuggingFaceEmbeddings
+from langchain_community.embeddings import HuggingFaceEmbeddings
 
 # Document processing imports
 import PyPDF2
 import docx
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.vectorstores import Chroma
+from langchain_community.vectorstores import FAISS
 from langchain.schema import Document
-
-# Replace the API key loading section at the top of your file with this:
+import numpy as np
 
 # Load environment variables
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
@@ -37,7 +37,7 @@ if not groq_key:
     groq_key = os.getenv("GROQ_API_KEY")
 
 if not groq_key:
-    st.error("❌ No GROQ_API_KEY found. Please set it in Streamlit Secrets or .env")
+    st.error("⚠ No GROQ_API_KEY found. Please set it in Streamlit Secrets or .env")
     st.info("For Streamlit Cloud: Add GROQ_API_KEY to your app secrets")
     st.info("For local development: Add GROQ_API_KEY to your .env file")
     st.stop()
@@ -45,7 +45,7 @@ if not groq_key:
 # Configure page
 st.set_page_config(
     page_title="Quick Query",
-    page_icon="🔍",
+    page_icon="📚",
     layout="centered",
     initial_sidebar_state="expanded"
 )
@@ -161,60 +161,66 @@ class DocumentProcessor:
             os.unlink(tmp_path)
 
 class EmbeddingsManager:
-    """Handles document embeddings and vector storage using free HuggingFace embeddings"""
+    """Handles document embeddings and vector storage using FAISS (Streamlit Cloud compatible)"""
     
     def __init__(self):
         self.vectorstore = None
-        self.persist_dir = "./chroma_db"
+        self.documents_metadata = []  # Store metadata separately
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=1000,
             chunk_overlap=200,
             length_function=len
         )
-        # Use free HuggingFace embeddings instead of OpenAI
+        # Use free HuggingFace embeddings
         self.embeddings = HuggingFaceEmbeddings(
             model_name="sentence-transformers/all-MiniLM-L6-v2"
         )
         
-        # Try to load existing vectorstore
+        # Try to load existing vectorstore from session state
         self._load_existing_vectorstore()
     
     def _load_existing_vectorstore(self):
-        """Try to load existing vectorstore from disk"""
+        """Try to load existing vectorstore from session state"""
         try:
-            if os.path.exists(self.persist_dir):
-                self.vectorstore = Chroma(
-                    persist_directory=self.persist_dir,
-                    embedding_function=self.embeddings
-                )
-                # Check if it has documents
-                collection = self.vectorstore._collection
-                if collection.count() > 0:
+            if 'faiss_vectorstore' in st.session_state and 'documents_metadata' in st.session_state:
+                self.vectorstore = st.session_state['faiss_vectorstore']
+                self.documents_metadata = st.session_state['documents_metadata']
+                if self.vectorstore is not None:
                     st.session_state.documents_loaded = True
-                    st.session_state.document_count = collection.count()
+                    st.session_state.document_count = len(self.documents_metadata)
                     st.session_state.vectorstore_loaded = True
         except Exception as e:
             st.warning(f"Could not load existing documents: {e}")
     
     def create_embeddings(self, documents: List[Document]) -> bool:
-        """Create embeddings for documents and store in vector database"""
+        """Create embeddings for documents and store in FAISS vector database"""
         try:
             # Split documents into chunks
             chunks = self.text_splitter.split_documents(documents)
             
-            # Create or update vector store with persistence
+            if not chunks:
+                st.error("No text chunks created from documents")
+                return False
+            
+            # Create or update vector store
             if self.vectorstore is None:
-                self.vectorstore = Chroma.from_documents(
+                self.vectorstore = FAISS.from_documents(
                     documents=chunks,
-                    embedding=self.embeddings,
-                    persist_directory=self.persist_dir
+                    embedding=self.embeddings
                 )
+                self.documents_metadata = [doc.metadata for doc in chunks]
             else:
                 # Add to existing vectorstore
-                self.vectorstore.add_documents(chunks)
+                new_vectorstore = FAISS.from_documents(
+                    documents=chunks,
+                    embedding=self.embeddings
+                )
+                self.vectorstore.merge_from(new_vectorstore)
+                self.documents_metadata.extend([doc.metadata for doc in chunks])
             
-            # Persist to disk
-            self.vectorstore.persist()
+            # Store in session state for persistence within session
+            st.session_state['faiss_vectorstore'] = self.vectorstore
+            st.session_state['documents_metadata'] = self.documents_metadata
             
             return True
         except Exception as e:
@@ -224,25 +230,31 @@ class EmbeddingsManager:
     def similarity_search(self, query: str, k: int = 5) -> List[Document]:
         """Search for similar documents"""
         if self.vectorstore:
-            return self.vectorstore.similarity_search(query, k=k)
+            try:
+                # FAISS similarity search returns documents with content and metadata
+                results = self.vectorstore.similarity_search(query, k=k)
+                return results
+            except Exception as e:
+                st.error(f"Error in similarity search: {e}")
+                return []
         return []
     
     def get_document_count(self) -> int:
         """Get the number of documents in the vectorstore"""
-        if self.vectorstore:
-            try:
-                return self.vectorstore._collection.count()
-            except:
-                return 0
-        return 0
+        return len(self.documents_metadata) if self.documents_metadata else 0
     
     def clear_documents(self) -> bool:
         """Clear all stored documents"""
         try:
-            if os.path.exists(self.persist_dir):
-                import shutil
-                shutil.rmtree(self.persist_dir)
             self.vectorstore = None
+            self.documents_metadata = []
+            
+            # Clear from session state
+            if 'faiss_vectorstore' in st.session_state:
+                del st.session_state['faiss_vectorstore']
+            if 'documents_metadata' in st.session_state:
+                del st.session_state['documents_metadata']
+            
             return True
         except Exception as e:
             st.error(f"Error clearing documents: {e}")
@@ -554,7 +566,6 @@ class RAGChatbot:
     
     def generate_response(self, query: str, mode: str = "Overview") -> tuple[str, List[str], Dict[str, Any]]:
         """Generate response using CrewAI RAG system"""
-               
         result = self.crewai_system.generate_response(query, mode)
         return result
 
@@ -618,7 +629,7 @@ def render_sidebar():
         # Show current document status
         if st.session_state.get('documents_loaded', False):
             doc_count = st.session_state.get('document_count', 0)
-            st.success(f"✅ {doc_count} document chunks loaded & persisted")
+            st.success(f"✅ {doc_count} document chunks loaded (session only)")
             
             col1, col2 = st.columns(2)
             with col1:
@@ -630,7 +641,7 @@ def render_sidebar():
                         st.error("Failed to clear documents")
             
             with col2:
-                if st.button("📄 Add More Documents"):
+                if st.button("📤 Add More Documents"):
                     st.session_state.show_uploader = True
                     st.rerun()
         
@@ -640,7 +651,7 @@ def render_sidebar():
                 "Choose files to add",
                 type=['pdf', 'docx', 'txt'],
                 accept_multiple_files=True,
-                help="Upload PDF, DOCX, or TXT files. Documents are stored permanently until cleared.",
+                help="Upload PDF, DOCX, or TXT files. Documents persist for current session only.",
                 key="file_uploader"
             )
             
@@ -683,7 +694,8 @@ def render_sidebar():
         
         # Document status
         if st.session_state.get('documents_loaded', False):
-            st.success(f"✅ {st.session_state.get('document_count', 0)} documents loaded")
+            st.info(f"📄 {st.session_state.get('document_count', 0)} chunks loaded")
+            st.caption("⚠️ Documents reset on page refresh")
         
         return uploaded_files, response_mode, show_sources, show_agent_info
 
@@ -785,10 +797,11 @@ def main():
     else:
         st.markdown('''
         <div class="main-header">
-            <h1>🔍 Find Answers Inside Your Documents</h1>
+            <h1>📚 Find Answers Inside Your Documents</h1>
         </div>
         ''', unsafe_allow_html=True)
-    # --- New section for list of topics ---
+    
+    # --- Topics section ---
     st.markdown("---")
     st.markdown("### 📚 List of Topics Available for Search")
     st.markdown("""
