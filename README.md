@@ -1,9 +1,3 @@
-Absolutely 👍 — adding your **Quick Query logo** or a screenshot at the top of the README will make the repo look much more polished.
-
-Here’s the updated **README.md** with a placeholder for your logo:
-
----
-
 ````markdown
 # 🔍 Quick Query
 
