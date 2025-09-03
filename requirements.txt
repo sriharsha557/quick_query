@@ -1,6 +1,7 @@
 # Core
 streamlit>=1.38.0
 python-dotenv>=1.0.1
+pysqlite3-binary
 
 # LangChain ecosystem (modern + Groq)
 langchain>=0.3.13,<0.4.0
