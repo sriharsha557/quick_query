@@ -1,4 +1,4 @@
-# Core UI
+# Core
 streamlit>=1.38.0
 python-dotenv>=1.0.1
 
@@ -7,27 +7,22 @@ langchain>=0.3.13,<0.4.0
 langchain-core>=0.3.75,<0.4.0
 langsmith>=0.3.45,<0.4.0
 langchain-groq>=0.3.7,<0.4.0
+langchain-community>=0.3.13,<0.4.0
 
-# CrewAI (latest, works with modern langchain)
+# CrewAI (latest, compatible with modern langchain)
 crewai>=0.28.0
 
-# Embeddings (HuggingFace + Sentence Transformers)
-transformers>=4.45.0
-sentence-transformers>=3.2.0
-
-# Vector DB
+# Vector DB (FAISS only, no ChromaDB)
 faiss-cpu>=1.8.0
-
-# Fix sqlite issue with ChromaDB (needed for persistence)
-pysqlite3-binary
 
 # Document processing
 PyPDF2>=3.0.1
 python-docx>=1.1.2
 
-# Data analysis & visualization
+# NLP
+textblob>=0.18.0
+numpy>=1.26.0
+
+# Data
 pandas>=2.2.2
 plotly>=5.24.1
-
-# NLP helpers
-textblob>=0.18.0
