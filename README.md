@@ -1,9 +1,15 @@
+Absolutely 👍 — adding your **Quick Query logo** or a screenshot at the top of the README will make the repo look much more polished.
+
+Here’s the updated **README.md** with a placeholder for your logo:
+
+---
+
 ````markdown
+# 🔍 Quick Query
 
 <p align="center">
-  <img src="assets/Quickquery.png" alt="Quick Query Logo" width="200"/>
+  <img src="assets/quickquery_logo.png" alt="Quick Query Logo" width="200"/>
 </p>
-# 🔍 Quick Query
 
 **Quick Query** is an interactive document search assistant built with [Streamlit](https://streamlit.io/), [LangChain](https://www.langchain.com/), and [CrewAI](https://github.com/joaomdmoura/crewai).  
 It allows you to upload documents (PDF, DOCX, etc.) and ask natural language questions to quickly find answers inside them.
@@ -103,4 +109,16 @@ Contributions are welcome! Please open an issue or pull request if you’d like 
 
 This project is licensed under the MIT License.
 
-```
+````
+
+
+### 🔹 How to use your logo
+1. Place your logo image (e.g., `quickquery_logo.png`) inside an `assets/` folder in your repo.  
+2. Update the path in the README:  
+   ```markdown
+   <img src="assets/quickquery_logo.png" alt="Quick Query Logo" width="200"/>
+````
+
+3. Commit and push to GitHub.
+
+---
