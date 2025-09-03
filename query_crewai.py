@@ -1,6 +1,7 @@
 import streamlit as st
 import tempfile
 import os
+import sys  # ✅ make sure sys is imported
 try:
     import pysqlite3  # modern sqlite
     sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
@@ -877,5 +878,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
