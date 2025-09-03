@@ -1,11 +1,12 @@
+
+<p align="center">
+  <img src="images/Quickquery.png" alt="Quick Query Logo" width="200"/>
+</p>
+
 ````markdown
 # 🔍 Quick Query
 
-<p align="center">
-  <img src="assets/quickquery_logo.png" alt="Quick Query Logo" width="200"/>
-</p>
-
-**Quick Query** is an interactive document search assistant built with [Streamlit](https://streamlit.io/), [LangChain](https://www.langchain.com/), and [CrewAI](https://github.com/joaomdmoura/crewai).  
+**Quick Query** is an interactive document search assistant built with [Streamlit], [LangChain], and [CrewAI].  
 It allows you to upload documents (PDF, DOCX, etc.) and ask natural language questions to quickly find answers inside them.
 
 ---
