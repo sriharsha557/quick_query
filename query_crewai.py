@@ -408,9 +408,22 @@ class CrewAIRAGSystem:
     
     def generate_response(self, query: str, mode: str = "Overview") -> tuple[str, List[str], Dict[str, Any]]:
         """Generate response using CrewAI agents with document search and LLM fallback"""
+        
+        # Enhanced debugging
+        st.sidebar.markdown("### 🔍 Query Debug")
+        st.sidebar.write(f"**Query:** {query[:50]}...")
+        st.sidebar.write(f"**Mode:** {mode}")
+        st.sidebar.write(f"**LLM Available:** {'Yes' if self.llm else 'No'}")
+        st.sidebar.write(f"**Agents Count:** {len(self.agents)}")
+        
         if not self.llm or not self.agents:
+            st.sidebar.error("❌ Entering fallback mode")
+            if self.initialization_error:
+                st.sidebar.write(f"**Error:** {self.initialization_error}")
             return self._fallback_response(query, mode), [], {}
 
+        st.sidebar.success("✅ Using CrewAI system")
+        
         try:
             # Use document_analyzer as the primary agent for all queries
             primary_agent = 'document_analyzer'
@@ -461,12 +474,16 @@ Always be transparent about whether information comes from documents or general 
             crew = Crew(
                 agents=[self.agents[primary_agent]],
                 tasks=[task],
-                verbose=True,
+                verbose=False,  # Reduce console noise
                 process=Process.sequential
             )
             
+            st.sidebar.write("🚀 Executing CrewAI task...")
+            
             with st.spinner("Analyzing your documents..."):
                 result = crew.kickoff()
+            
+            st.sidebar.success("✅ Task completed!")
             
             # Extract sources from the search results
             sources = self._extract_sources_from_search()
@@ -480,7 +497,7 @@ Always be transparent about whether information comes from documents or general 
             return str(result), sources, agent_info
             
         except Exception as e:
-            st.error(f"Error in CrewAI execution: {str(e)}")
+            st.sidebar.error(f"💥 CrewAI execution error: {str(e)}")
             return self._fallback_response(query, mode), [], {}
     
     def generate_llm_response(self, query: str, mode: str = "Overview") -> tuple[str, List[str], Dict[str, Any]]:
