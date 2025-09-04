@@ -438,19 +438,18 @@ Instructions:
             return self._fallback_response(query, mode), [], {}
     
     def _extract_sources_from_search_results(self, search_results: str) -> List[str]:
-        """Extract source names from search results"""
-        sources = []
+        """Extract unique document sources, not individual chunks"""
+        sources = set()  # Use set to avoid duplicates
         lines = search_results.split('\n')
         for line in lines:
             if line.startswith('**Source') and ':' in line:
-                # Extract source name between "Source X: " and "**"
-                try:
-                    source_part = line.split(':', 1)[1].split('**')[0].strip()
-                    if source_part and source_part not in sources:
-                        sources.append(source_part)
-                except:
-                    continue
-        return sources
+                source_part = line.split(':', 1)[1].split('**')[0].strip()
+                # Extract just the filename, not the section
+                if source_part:
+                    # Get just the main filename before any parentheses
+                    main_source = source_part.split('(')[0].strip()
+                    sources.add(main_source)
+        return list(sources)
     
     def _fallback_response(self, query: str, mode: str) -> str:
         """Fallback response when system is not available"""
@@ -868,3 +867,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
