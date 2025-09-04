@@ -67,34 +67,89 @@ class ChatMessage:
     agent_info: Optional[Dict[str, Any]] = None
 
 class DocumentSearchTool(BaseTool):
-    """Custom CrewAI tool for document search"""
+    """Custom CrewAI tool for document search with relevance scoring"""
     name: str = "document_search"
-    description: str = "Search through uploaded documents for relevant information based on a query. Use this tool to find relevant content from uploaded documents before answering questions."
+    description: str = "Search through uploaded documents for relevant information based on a query. Returns both relevant content and a relevance score to determine if the information is sufficient to answer the query."
     
     def __init__(self, embeddings_manager=None):
         super().__init__()
         self._embeddings_manager = embeddings_manager
     
     def _run(self, query: str) -> str:
-        """Execute the document search"""
+        """Execute the document search with relevance assessment"""
         try:
             if not self._embeddings_manager:
-                return "Document search system not initialized."
+                return "SEARCH_ERROR: Document search system not initialized."
             
             relevant_docs = self._embeddings_manager.similarity_search(query, k=5)
             if not relevant_docs:
-                return "No relevant documents found for this query."
+                return "NO_CONTENT_FOUND: No relevant documents found for this query."
             
             # Combine relevant chunks with source information
             results = []
-            for doc in relevant_docs:
-                source = doc.metadata.get('source', 'Unknown')
-                content = doc.page_content[:500] + "..." if len(doc.page_content) > 500 else doc.page_content
-                results.append(f"**Source: {source}**\n{content}")
+            total_content_length = 0
             
-            return "\n\n".join(results)
+            for i, doc in enumerate(relevant_docs):
+                source = doc.metadata.get('source', 'Unknown')
+                content = doc.page_content.strip()
+                
+                # Add content length for relevance assessment
+                total_content_length += len(content)
+                
+                # Truncate very long content but keep it substantial
+                if len(content) > 800:
+                    content = content[:800] + "..."
+                
+                results.append(f"**Source {i+1}: {source}**\n{content}")
+            
+            # Add a relevance indicator based on content found
+            if total_content_length < 100:
+                relevance_note = "\n\nRELEVANCE_LOW: Limited content found. May not fully address the query."
+            elif total_content_length < 500:
+                relevance_note = "\n\nRELEVANCE_MEDIUM: Some relevant content found."
+            else:
+                relevance_note = "\n\nRELEVANCE_HIGH: Substantial relevant content found."
+            
+            return "\n\n".join(results) + relevance_note
+            
         except Exception as e:
-            return f"Error searching documents: {str(e)}"
+            return f"SEARCH_ERROR: Error searching documents: {str(e)}"
+    
+    async def _arun(self, query: str) -> str:
+        """Async version of the tool"""
+        return self._run(query)
+
+class LLMFallbackTool(BaseTool):
+    """Tool for direct LLM queries when document content is insufficient"""
+    name: str = "llm_fallback"
+    description: str = "Use the LLM to provide a general answer when document content is insufficient or not found. This tool provides answers based on the LLM's training data rather than uploaded documents."
+    
+    def __init__(self, llm=None):
+        super().__init__()
+        self._llm = llm
+    
+    def _run(self, query: str) -> str:
+        """Execute direct LLM query"""
+        try:
+            if not self._llm:
+                return "LLM_ERROR: Language model not available."
+            
+            fallback_prompt = f"""The user asked: "{query}"
+
+Since no relevant content was found in the uploaded documents, provide a helpful general answer based on your knowledge. 
+
+Please structure your response as follows:
+1. Acknowledge that the answer is based on general knowledge, not the uploaded documents
+2. Provide a comprehensive answer to the question
+3. Suggest what type of documents might contain more specific information about this topic
+
+Keep the response informative and helpful."""
+
+            response = self._llm.invoke(fallback_prompt)
+            return f"LLM_RESPONSE: {response.content}"
+            
+        except Exception as e:
+            return f"LLM_ERROR: Error getting LLM response: {str(e)}"
     
     async def _arun(self, query: str) -> str:
         """Async version of the tool"""
@@ -209,6 +264,12 @@ class EmbeddingsManager:
                 st.error("No text chunks created from documents")
                 return False
             
+            # Limit chunks for cloud deployment (prevent memory issues)
+            MAX_CHUNKS = 1000  # Adjust based on your needs
+            if len(chunks) > MAX_CHUNKS:
+                st.warning(f"Large document set detected. Processing first {MAX_CHUNKS} chunks for optimal performance.")
+                chunks = chunks[:MAX_CHUNKS]
+            
             # Create or update vector store
             if self.vectorstore is None:
                 self.vectorstore = FAISS.from_documents(
@@ -268,7 +329,7 @@ class EmbeddingsManager:
             return False
 
 class CrewAIRAGSystem:
-    """CrewAI-based RAG system with specialized agents using Groq LLaMA 3"""
+    """CrewAI-based RAG system with generic agents and LLM fallback"""
     
     def __init__(self, embeddings_manager: EmbeddingsManager):
         self.embeddings_manager = embeddings_manager
@@ -283,7 +344,7 @@ class CrewAIRAGSystem:
                 # Use Groq's LLaMA 3 with correct model name
                 self.llm = ChatGroq(
                     groq_api_key=self.groq_api_key,
-                    model="llama-3.1-8b-instant",  # Remove 'groq/' prefix
+                    model="llama-3.1-8b-instant",
                     temperature=0.7,
                     max_tokens=1500
                 )
@@ -297,199 +358,198 @@ class CrewAIRAGSystem:
                 self.llm = None
     
     def _setup_agents_and_tools(self):
-        """Setup CrewAI agents and tools"""
+        """Setup CrewAI agents and tools for generic document analysis"""
         if not self.llm:
             return
             
-        # Create document search tool
+        # Create tools
         doc_search_tool = DocumentSearchTool(embeddings_manager=self.embeddings_manager)
-        self.tools = [doc_search_tool]
+        llm_fallback_tool = LLMFallbackTool(llm=self.llm)
+        self.tools = [doc_search_tool, llm_fallback_tool]
         
-        # Data Vault Expert Agent
-        self.agents['data_vault_expert'] = Agent(
-            role='Data Vault 2.0 Expert',
-            goal='Provide accurate and detailed information about Data Vault 2.0 methodology, architecture, and best practices',
-            backstory="""You are a senior data architect with extensive experience in Data Vault 2.0 methodology. 
-            You understand hub, link, and satellite structures, temporal aspects, and business keys. You can explain 
-            complex data vault concepts in clear, actionable terms.""",
-            verbose=True,  # Enable verbose for debugging
+        # Document Analyzer Agent - Generic document analysis
+        self.agents['document_analyzer'] = Agent(
+            role='Document Content Analyzer',
+            goal='Analyze uploaded documents to find relevant information and provide accurate answers based on document content',
+            backstory="""You are an expert document analyst capable of understanding and extracting information from any type of document. 
+            You excel at finding relevant content, understanding context, and providing clear, accurate answers based on the available information. 
+            When document content is insufficient, you know when to recommend using general knowledge instead.""",
+            verbose=True,
             allow_delegation=False,
             tools=self.tools,
             llm=self.llm
         )
         
-        # VaultSpeed Expert Agent
-        self.agents['vaultspeed_expert'] = Agent(
-            role='VaultSpeed Specialist',
-            goal='Provide expert guidance on VaultSpeed automation, configuration, and implementation',
-            backstory="""You are a VaultSpeed specialist with deep knowledge of automation tools, 
-            code generation, metadata management, and deployment strategies. You help teams implement 
-            efficient data vault solutions using VaultSpeed technology.""",
-            verbose=True,  # Enable verbose for debugging
+        # Research Assistant Agent - Handles queries when documents don't contain enough info
+        self.agents['research_assistant'] = Agent(
+            role='Research Assistant',
+            goal='Provide comprehensive answers using general knowledge when document content is insufficient',
+            backstory="""You are a knowledgeable research assistant who provides helpful information when specific documents 
+            don't contain the needed information. You clearly distinguish between document-based answers and general knowledge, 
+            and you guide users on what types of documents might contain more specific information.""",
+            verbose=True,
             allow_delegation=False,
             tools=self.tools,
             llm=self.llm
         )
         
-        # Airflow Expert Agent
-        self.agents['airflow_expert'] = Agent(
-            role='Apache Airflow Expert',
-            goal='Provide comprehensive guidance on Airflow orchestration, DAGs, and data pipeline management',
-            backstory="""You are an experienced data engineer specializing in Apache Airflow. You understand 
-            DAG design patterns, task dependencies, scheduling, monitoring, and integration with data vault systems. 
-            You provide practical solutions for complex orchestration challenges.""",
-            verbose=True,  # Enable verbose for debugging
-            allow_delegation=False,
-            tools=self.tools,
-            llm=self.llm
-        )
-        
-        # Research Coordinator Agent
-        self.agents['coordinator'] = Agent(
-            role='Technical Research Coordinator',
-            goal='Coordinate research across different domains and provide comprehensive, well-structured responses',
-            backstory="""You are a technical coordinator who excels at synthesizing information from multiple 
-            expert sources. You ensure responses are comprehensive, well-organized, and address all aspects 
-            of complex technical questions.""",
-            verbose=True,  # Enable verbose for debugging
+        # Content Coordinator Agent - Routes queries and coordinates responses
+        self.agents['content_coordinator'] = Agent(
+            role='Content Coordinator',
+            goal='Coordinate information retrieval from documents and provide well-structured responses, falling back to general knowledge when needed',
+            backstory="""You are a content coordinator who excels at finding the best available information to answer user queries. 
+            You first check uploaded documents thoroughly, and when the content is insufficient, you seamlessly provide general knowledge 
+            while being transparent about the source of information.""",
+            verbose=True,
             allow_delegation=True,
             tools=self.tools,
             llm=self.llm
         )
     
-    # Add this debug version of the generate_response method to your CrewAIRAGSystem class:
-
     def generate_response(self, query: str, mode: str = "Overview") -> tuple[str, List[str], Dict[str, Any]]:
-        """Generate response using CrewAI agents"""
-        # Simple test first
-        if not self.llm:
-            return "ERROR: No LLM found", [], {}
-    
-        if not self.agents:
-            return "ERROR: No agents found", [], {}
-    
-        try:
-            # Just test the LLM directly first
-            simple_response = self.llm.invoke(f"Answer this question about data vault: {query}")
-        
-            return f"✅ SUCCESS! LLM Response: {simple_response.content}", [], {
-                'primary_agent': 'test',
-                'agent_role': 'Direct LLM Test',
-                'mode': mode
-            }
-        
-        except Exception as e:
-            return f"ERROR in LLM call: {str(e)}", [], {}
-    
-    # Add debug information
-        st.write(f"🔍 **Debug Checks:**")
-        st.write(f"- LLM status: {self.llm is not None}")
-        st.write(f"- LLM type: {type(self.llm)}")
-        st.write(f"- Number of agents: {len(self.agents)}")
-        st.write(f"- Available agents: {list(self.agents.keys())}")
-        st.write(f"- API Key present: {bool(self.groq_api_key)}")
-    
-    # Check the condition that determines fallback
-        llm_check = self.llm is not None
-        agents_check = bool(self.agents)
-    
-        st.write(f"- LLM check result: {llm_check}")
-        st.write(f"- Agents check result: {agents_check}")
-        st.write(f"- Combined check (should be True): {llm_check and agents_check}")
-    
+        """Generate response using CrewAI agents with document search and LLM fallback"""
         if not self.llm or not self.agents:
-            st.error("🚨 **Debug: Entering fallback mode**")
-            st.write(f"Reason: LLM={self.llm is not None}, Agents={bool(self.agents)}")
             return self._fallback_response(query, mode), [], {}
-    
-        st.success("✅ **Debug: Conditions met, proceeding with CrewAI**")
-    
+
         try:
-        # Determine the best agent for this query
-            primary_agent = self._determine_relevant_agent(query)
-            st.write(f"🤖 **Debug: Selected agent: {primary_agent}**")
-        
-        # Check if the selected agent exists
-            if primary_agent not in self.agents:
-                st.error(f"❌ Selected agent '{primary_agent}' not found in agents!")
-                return self._fallback_response(query, mode), [], {}
-        
-            st.write(f"✅ Agent '{primary_agent}' found successfully")
-        
-        # Create task based on response mode
+            # Use document_analyzer as the primary agent for all queries
+            primary_agent = 'document_analyzer'
+            
+            # Create task based on response mode
             if mode == "Overview":
                 task_description = f"""Analyze the user query: "{query}"
-            
-                First, use the document_search tool to find relevant information from the uploaded documents.
-                Then provide a concise overview response that includes:
-                1. Key points relevant to the query (use bullet points)
-                2. Brief explanations of important concepts
-                3. Practical recommendations if applicable
-            
-                Keep the response focused and easy to understand."""
+
+STEP 1: Use the document_search tool to find relevant information from uploaded documents.
+
+STEP 2: Evaluate the search results:
+- If you find RELEVANT and SUFFICIENT content (marked as RELEVANCE_HIGH or RELEVANCE_MEDIUM), use it to answer the query
+- If you find LIMITED or NO relevant content (marked as RELEVANCE_LOW, NO_CONTENT_FOUND, or SEARCH_ERROR), inform the user and ask if they want a general answer
+
+STEP 3: Provide response:
+- FOR SUFFICIENT DOCUMENT CONTENT: Provide a concise overview with key points from the documents
+- FOR INSUFFICIENT CONTENT: Say "I couldn't find sufficient information about '{query}' in your uploaded documents. Would you like me to provide a general answer based on my knowledge instead?"
+
+Format your response clearly and cite sources when using document content."""
+
             else:  # Deep Dive
                 task_description = f"""Analyze the user query: "{query}"
-            
-                First, use the document_search tool to find comprehensive information from the uploaded documents.
-                Then provide a detailed deep-dive response that includes:
-                1. Detailed explanation of relevant concepts
-                2. Technical implementation details
-                3. Best practices and recommendations
-                4. Potential challenges and solutions
-                5. Integration considerations if applicable
-            
-                Provide thorough, technical depth while maintaining clarity."""
-        
-            st.write("📝 **Debug: Creating task...**")
-        
+
+STEP 1: Use the document_search tool to thoroughly search for relevant information from uploaded documents.
+
+STEP 2: Evaluate the search results:
+- If you find RELEVANT and SUFFICIENT content, provide a detailed analysis
+- If content is LIMITED or INSUFFICIENT, inform the user and offer to use general knowledge
+
+STEP 3: Provide response:
+- FOR SUFFICIENT DOCUMENT CONTENT: Provide detailed analysis with:
+  * Comprehensive explanation from document content
+  * Technical details and specifics found in documents
+  * Cross-references between different document sections
+  * Implementation guidance if present in documents
+- FOR INSUFFICIENT CONTENT: Explain what was and wasn't found, then ask: "The uploaded documents don't contain enough information about '{query}'. Would you like me to provide a detailed answer using my general knowledge instead?"
+
+Always be transparent about whether information comes from documents or general knowledge."""
+
             # Create and execute task
             task = Task(
-            description=task_description,
-            agent=self.agents[primary_agent],
-            expected_output="A well-structured response based on the document content and agent expertise"
+                description=task_description,
+                agent=self.agents[primary_agent],
+                expected_output="A well-structured response based on document analysis with clear indication of information source"
             )
-            st.write("👥 **Debug: Creating crew...**")
-        
+            
             # Create crew and execute
             crew = Crew(
-            agents=[self.agents[primary_agent]],
-            tasks=[task],
-            verbose=True,  # Enable verbose for debugging
-            process=Process.sequential
+                agents=[self.agents[primary_agent]],
+                tasks=[task],
+                verbose=True,
+                process=Process.sequential
             )
-        
-            st.write("🚀 **Debug: Executing CrewAI task...**")
-        
-            with st.spinner("CrewAI agents processing..."):
+            
+            with st.spinner("Analyzing your documents..."):
                 result = crew.kickoff()
-        
-            st.write(f"✅ **Debug: Task completed successfully!**")
-            st.write(f"Result type: {type(result)}")
-            st.write(f"Result preview: {str(result)[:200]}...")
-        
+            
             # Extract sources from the search results
             sources = self._extract_sources_from_search()
-        
+            
             agent_info = {
-            'primary_agent': primary_agent,
-            'agent_role': self.agents[primary_agent].role,
-            'mode': mode
+                'primary_agent': primary_agent,
+                'agent_role': self.agents[primary_agent].role,
+                'mode': mode
             }
-        
+            
             return str(result), sources, agent_info
-        
+            
         except Exception as e:
-            st.error(f"💥 **Debug: CrewAI execution error occurred**")
-            st.error(f"Error: {str(e)}")
-            st.error(f"Error type: {type(e)}")
-            import traceback
-            st.error(f"Traceback: {traceback.format_exc()}")
+            st.error(f"Error in CrewAI execution: {str(e)}")
+            return self._fallback_response(query, mode), [], {}
+    
+    def generate_llm_response(self, query: str, mode: str = "Overview") -> tuple[str, List[str], Dict[str, Any]]:
+        """Generate response using LLM when user requests general knowledge answer"""
+        if not self.llm:
+            return "LLM not available", [], {}
+        
+        try:
+            # Use research_assistant agent for LLM-based responses
+            primary_agent = 'research_assistant'
+            
+            if mode == "Overview":
+                task_description = f"""The user asked: "{query}"
+
+Since the uploaded documents didn't contain sufficient information, provide a helpful general answer using the llm_fallback tool.
+
+Provide a concise overview response that includes:
+1. Clear indication that this answer is based on general knowledge, not the uploaded documents
+2. Key points relevant to the query
+3. Brief explanations of important concepts
+4. Suggestions for what types of documents might contain more specific information
+
+Keep the response focused and helpful."""
+
+            else:  # Deep Dive
+                task_description = f"""The user asked: "{query}"
+
+Since the uploaded documents didn't contain sufficient information, provide a comprehensive general answer using the llm_fallback tool.
+
+Provide a detailed response that includes:
+1. Clear indication that this answer is based on general knowledge
+2. Comprehensive explanation of relevant concepts
+3. Technical details and best practices
+4. Implementation considerations
+5. Recommendations for finding more specific information
+
+Provide thorough, informative content while being clear about the knowledge source."""
+
+            # Create and execute task
+            task = Task(
+                description=task_description,
+                agent=self.agents[primary_agent],
+                expected_output="A comprehensive response based on general knowledge with clear source indication"
+            )
+            
+            crew = Crew(
+                agents=[self.agents[primary_agent]],
+                tasks=[task],
+                verbose=True,
+                process=Process.sequential
+            )
+            
+            with st.spinner("Generating answer from general knowledge..."):
+                result = crew.kickoff()
+            
+            agent_info = {
+                'primary_agent': primary_agent,
+                'agent_role': self.agents[primary_agent].role + " (General Knowledge)",
+                'mode': mode
+            }
+            
+            return str(result), [], agent_info
+            
+        except Exception as e:
+            st.error(f"Error generating LLM response: {str(e)}")
             return self._fallback_response(query, mode), [], {}
     
     def _extract_sources_from_search(self) -> List[str]:
         """Extract sources from recent search operations"""
-        # This would be enhanced to track sources from tool usage
-        # For now, return a placeholder
         if hasattr(st.session_state, 'recent_sources'):
             return st.session_state.recent_sources
         return []
@@ -497,34 +557,34 @@ class CrewAIRAGSystem:
     def _fallback_response(self, query: str, mode: str) -> str:
         """Fallback response when CrewAI is not available"""
         if mode == "Overview":
-            return f"""**Overview Response for: "{query}"**
+            return f"""**Configuration Required for: "{query}"**
 
-• **Configuration Required**: CrewAI system requires Groq API key in .env file
-• **Fallback Mode**: Currently operating in basic mode
+• **CrewAI System**: Requires Groq API key for full functionality
+• **Current Status**: Operating in fallback mode
 • **Expected Features**: With proper configuration, you'll get:
-  - Expert agent analysis
-  - Document-based responses
-  - Specialized domain knowledge
+  - Document content analysis
+  - Automatic fallback to general knowledge when needed
+  - Source attribution and relevance scoring
 
 *Please ensure your .env file contains: GROQ_API_KEY=your_key_here*"""
         else:
-            return f"""**Deep Dive Analysis - Configuration Required**
+            return f"""**System Configuration Required**
 
-Your query "{query}" would normally be processed by our specialized CrewAI agents using Groq's LLaMA 3:
+Your query "{query}" requires the full CrewAI system with:
 
-**Data Vault Expert**: For questions about DV2.0 methodology, hubs, links, satellites
-**VaultSpeed Specialist**: For automation, code generation, and tooling questions  
-**Airflow Expert**: For orchestration, DAGs, and pipeline management
+**Document Analyzer**: Searches through uploaded content for relevant information
+**Research Assistant**: Provides general knowledge when documents are insufficient  
+**Content Coordinator**: Manages information flow and response coordination
 
 **To enable full functionality:**
 1. Create a .env file in your project root
 2. Add your Groq API key: GROQ_API_KEY=your_key_here
 3. Restart the application
 
-**Current Status**: Operating in fallback mode without agent-based analysis."""
+**Current Status**: Operating in basic fallback mode."""
 
 class RAGChatbot:
-    """Main RAG chatbot class with CrewAI integration"""
+    """Main RAG chatbot class with CrewAI integration and LLM fallback"""
     
     def __init__(self):
         self.embeddings_manager = EmbeddingsManager()
@@ -573,8 +633,11 @@ class RAGChatbot:
     
     def generate_response(self, query: str, mode: str = "Overview") -> tuple[str, List[str], Dict[str, Any]]:
         """Generate response using CrewAI RAG system"""
-        result = self.crewai_system.generate_response(query, mode)
-        return result
+        return self.crewai_system.generate_response(query, mode)
+    
+    def generate_llm_response(self, query: str, mode: str = "Overview") -> tuple[str, List[str], Dict[str, Any]]:
+        """Generate response using LLM fallback"""
+        return self.crewai_system.generate_llm_response(query, mode)
 
 def load_image_as_base64(image_path: str) -> str:
     """Load image and convert to base64 - supports both local and git paths"""
@@ -682,7 +745,7 @@ def render_sidebar():
         response_mode = st.selectbox(
             "Response Mode",
             ["Overview", "Deep Dive"],
-            help="Overview: Concise bullet points | Deep Dive: Detailed analysis"
+            help="Overview: Concise responses | Deep Dive: Detailed analysis"
         )
         
         # Show sources toggle
@@ -752,6 +815,12 @@ def main():
         st.session_state.documents_loaded = False
     if 'chatbot' not in st.session_state:
         st.session_state.chatbot = RAGChatbot()
+    if 'awaiting_llm_confirmation' not in st.session_state:
+        st.session_state.awaiting_llm_confirmation = False
+    if 'pending_query' not in st.session_state:
+        st.session_state.pending_query = ""
+    if 'pending_mode' not in st.session_state:
+        st.session_state.pending_mode = ""
     
     # Custom CSS with plain white header
     st.markdown("""
@@ -778,6 +847,13 @@ def main():
         bottom: 0;
         background: white;
         padding: 20px 0;
+    }
+    .llm-confirmation {
+        background-color: #fff3cd;
+        border: 1px solid #ffeaa7;
+        border-radius: 10px;
+        padding: 15px;
+        margin: 10px 0;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -808,18 +884,15 @@ def main():
         </div>
         ''', unsafe_allow_html=True)
     
-    # --- Topics section ---
+    # Updated topics section for generic documents
     st.markdown("---")
-    st.markdown("### 📚 List of Topics Available for Search")
+    st.markdown("### 📚 How It Works")
     st.markdown("""
-    - Data Vault 2.0 Fundamentals  
-    - Hubs, Links, and Satellites  
-    - Business Keys and Surrogate Keys  
-    - Staging Layer Best Practices  
-    - PIT & Bridge Tables  
-    - Data Vault vs Dimensional Modeling  
-    - Automation in Data Vault  
-    - Agile Delivery with Data Vault  
+    **Step 1:** Upload any documents (PDF, DOCX, TXT)  
+    **Step 2:** Ask questions about your content  
+    **Step 3:** Get answers from your documents, or general knowledge if needed  
+    
+    **✨ Smart Fallback:** If your documents don't contain the answer, I'll offer to help with general knowledge instead!
     """)
     
     # Handle file uploads only if new files are uploaded
@@ -835,25 +908,23 @@ def main():
         for message in st.session_state.chat_history:
             render_chat_message(message, show_sources, show_agent_info)
     
-    # Input area
-    with st.container():
-        if st.session_state.documents_loaded:
-            # Chat input
-            user_input = st.chat_input("Ask a question about your documents...")
-            
-            if user_input:
-                # Add user message to history
-                user_message = ChatMessage(
-                    role="user",
-                    content=user_input,
-                    timestamp=datetime.now()
-                )
-                st.session_state.chat_history.append(user_message)
-                
-                # Generate response
-                with st.spinner("CrewAI agents are analyzing your question using Groq LLaMA 3..."):
-                    response_content, sources, agent_info = st.session_state.chatbot.generate_response(
-                        user_input, response_mode
+    # Check if we're awaiting LLM confirmation
+    if st.session_state.awaiting_llm_confirmation:
+        st.markdown("""
+        <div class="llm-confirmation">
+            <h4>🤔 Would you like a general answer?</h4>
+            <p>I couldn't find sufficient information in your uploaded documents. Would you like me to provide an answer based on my general knowledge instead?</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        col1, col2, col3 = st.columns([1, 1, 2])
+        
+        with col1:
+            if st.button("✅ Yes, please"):
+                # Generate LLM response
+                with st.spinner("Generating answer from general knowledge..."):
+                    response_content, sources, agent_info = st.session_state.chatbot.generate_llm_response(
+                        st.session_state.pending_query, st.session_state.pending_mode
                     )
                 
                 # Add assistant message to history
@@ -866,18 +937,94 @@ def main():
                 )
                 st.session_state.chat_history.append(assistant_message)
                 
+                # Reset confirmation state
+                st.session_state.awaiting_llm_confirmation = False
+                st.session_state.pending_query = ""
+                st.session_state.pending_mode = ""
                 st.rerun()
+        
+        with col2:
+            if st.button("❌ No, thanks"):
+                # Add a message indicating the user declined
+                assistant_message = ChatMessage(
+                    role="assistant",
+                    content="No problem! Feel free to ask another question or upload more specific documents that might contain the information you're looking for.",
+                    timestamp=datetime.now(),
+                    sources=None,
+                    agent_info={"agent_role": "System", "mode": ""}
+                )
+                st.session_state.chat_history.append(assistant_message)
+                
+                # Reset confirmation state
+                st.session_state.awaiting_llm_confirmation = False
+                st.session_state.pending_query = ""
+                st.session_state.pending_mode = ""
+                st.rerun()
+    
+    # Input area
+    with st.container():
+        if st.session_state.documents_loaded:
+            # Only show chat input if we're not waiting for confirmation
+            if not st.session_state.awaiting_llm_confirmation:
+                user_input = st.chat_input("Ask a question about your documents...")
+                
+                if user_input:
+                    # Add user message to history
+                    user_message = ChatMessage(
+                        role="user",
+                        content=user_input,
+                        timestamp=datetime.now()
+                    )
+                    st.session_state.chat_history.append(user_message)
+                    
+                    # Generate response
+                    with st.spinner("Analyzing your documents..."):
+                        response_content, sources, agent_info = st.session_state.chatbot.generate_response(
+                            user_input, response_mode
+                        )
+                    
+                    # Check if the response indicates insufficient content
+                    if ("couldn't find sufficient information" in response_content.lower() or 
+                        "would you like me to provide a general answer" in response_content.lower()):
+                        
+                        # Add the agent's response about insufficient content
+                        assistant_message = ChatMessage(
+                            role="assistant",
+                            content=response_content,
+                            timestamp=datetime.now(),
+                            sources=sources if show_sources else None,
+                            agent_info=agent_info
+                        )
+                        st.session_state.chat_history.append(assistant_message)
+                        
+                        # Set up for LLM confirmation
+                        st.session_state.awaiting_llm_confirmation = True
+                        st.session_state.pending_query = user_input
+                        st.session_state.pending_mode = response_mode
+                        
+                    else:
+                        # Add normal assistant message to history
+                        assistant_message = ChatMessage(
+                            role="assistant",
+                            content=response_content,
+                            timestamp=datetime.now(),
+                            sources=sources if show_sources else None,
+                            agent_info=agent_info
+                        )
+                        st.session_state.chat_history.append(assistant_message)
+                    
+                    st.rerun()
         else:
-            st.info("👆 Please upload documents using the sidebar to start chatting with CrewAI agents!")
+            st.info("👆 Please upload documents using the sidebar to start chatting!")
     
     # Clear chat button
     if st.session_state.chat_history:
         if st.button("🗑️ Clear Chat History"):
             st.session_state.chat_history = []
+            st.session_state.awaiting_llm_confirmation = False
+            st.session_state.pending_query = ""
+            st.session_state.pending_mode = ""
             st.rerun()
 
 if __name__ == "__main__":
     main()
-
-
-
