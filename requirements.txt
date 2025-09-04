@@ -1,34 +1,33 @@
-# Core
-streamlit>=1.38.0
-python-dotenv>=1.0.1
-pysqlite3-binary
+# Core Streamlit
+streamlit>=1.28.0
 
-# LangChain ecosystem (modern + Groq)
-langchain>=0.3.13,<0.4.0
-langchain-core>=0.3.75,<0.4.0
-langsmith>=0.3.45,<0.4.0
-langchain-groq>=0.3.7,<0.4.0
-langchain-community>=0.3.13,<0.4.0
+# LLM and AI Libraries
+langchain>=0.0.350
+langchain-community>=0.0.38
+langchain-groq>=0.1.3
+langchain-huggingface>=0.0.3
 
-# CrewAI (latest, compatible with modern langchain)
-crewai>=0.28.0
-
-# Vector DB (FAISS only, no ChromaDB)
-faiss-cpu>=1.8.0
-
-# Embeddings
-sentence-transformers>=3.0.1
-transformers>=4.44.0
-torch>=2.3.0
-
-# Document processing
+# Document Processing
 PyPDF2>=3.0.1
-python-docx>=1.1.2
+python-docx>=0.8.11
 
-# NLP
-textblob>=0.18.0
-numpy>=1.26.0
+# Vector Database and Embeddings
+faiss-cpu>=1.7.4
+sentence-transformers>=2.2.2
 
-# Data
-pandas>=2.2.2
-plotly>=5.24.1
+# Data Science and Utilities
+numpy>=1.24.3
+pandas>=2.0.3
+python-dotenv>=1.0.0
+
+# HTTP and Networking
+requests>=2.31.0
+urllib3>=2.0.4
+
+# For SQLite compatibility (Streamlit Cloud)
+pysqlite3-binary>=0.5.0
+
+# Additional dependencies that might be needed
+typing-extensions>=4.7.1
+pydantic>=2.0.0
+tenacity>=8.2.3
