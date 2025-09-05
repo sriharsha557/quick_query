@@ -15,23 +15,6 @@ import io
 import pickle
 from dotenv import load_dotenv
 
-# CrewAI and LLM imports with error handling
-try:
-    from crewai import Agent, Task, Crew, Process
-    from crewai.tools import BaseTool
-    CREWAI_AVAILABLE = True
-except ImportError as e:
-    st.error(f"CrewAI import error: {e}")
-    CREWAI_AVAILABLE = False
-
-try:
-    from langchain_groq import ChatGroq
-    from langchain_community.embeddings import HuggingFaceEmbeddings
-    LANGCHAIN_AVAILABLE = True
-except ImportError as e:
-    st.error(f"LangChain import error: {e}")
-    LANGCHAIN_AVAILABLE = False
-
 # Document processing imports
 import PyPDF2
 import docx
@@ -867,4 +850,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
