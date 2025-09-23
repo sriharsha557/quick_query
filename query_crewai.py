@@ -8,20 +8,61 @@ import base64
 import io
 from dotenv import load_dotenv
 
-# CrewAI and LLM imports
-from crewai import Agent, Task, Crew, Process
-from crewai.tools import BaseTool
-from langchain_groq import ChatGroq
-from langchain.embeddings import HuggingFaceEmbeddings
+# Check for required dependencies and show helpful error messages
+missing_deps = []
+import_errors = {}
+
+# Core LLM imports with error handling
+try:
+    from langchain_groq import ChatGroq
+    from langchain.embeddings import HuggingFaceEmbeddings
+except ImportError as e:
+    missing_deps.append("langchain-groq")
+    import_errors["langchain"] = str(e)
+
+# CrewAI imports with error handling
+try:
+    from crewai import Agent, Task, Crew, Process
+    from crewai.tools import BaseTool
+    CREWAI_AVAILABLE = True
+except ImportError as e:
+    CREWAI_AVAILABLE = False
+    missing_deps.append("crewai")
+    import_errors["crewai"] = str(e)
 
 # Document processing imports
-import PyPDF2
-import docx
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.vectorstores import Chroma
-from langchain.schema import Document
+try:
+    import PyPDF2
+    import docx
+    from langchain.text_splitter import RecursiveCharacterTextSplitter
+    from langchain.vectorstores import Chroma
+    from langchain.schema import Document
+except ImportError as e:
+    missing_deps.append("document-processing")
+    import_errors["docs"] = str(e)
 
-# Replace the API key loading section at the top of your file with this:
+# Show dependency errors at the top of the app
+if missing_deps:
+    st.error("🚨 **Missing Required Dependencies**")
+    st.error(f"The following packages are not installed: {', '.join(missing_deps)}")
+    
+    with st.expander("📋 Installation Instructions", expanded=True):
+        st.markdown("""
+        **For local development:**
+        ```bash
+        pip install crewai crewai-tools langchain-groq chromadb sentence-transformers PyPDF2 python-docx
+        ```
+        
+        **For Streamlit Cloud deployment:**
+        1. Update your `requirements.txt` file with the packages shown in the artifact above
+        2. Redeploy your app
+        
+        **Missing packages details:**
+        """)
+        for pkg, error in import_errors.items():
+            st.code(f"{pkg}: {error}")
+    
+    st.stop()
 
 # Load environment variables
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
@@ -172,15 +213,22 @@ class EmbeddingsManager:
             length_function=len
         )
         # Use free HuggingFace embeddings instead of OpenAI
-        self.embeddings = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2"
-        )
+        try:
+            self.embeddings = HuggingFaceEmbeddings(
+                model_name="sentence-transformers/all-MiniLM-L6-v2"
+            )
+        except Exception as e:
+            st.error(f"Failed to initialize embeddings: {e}")
+            self.embeddings = None
         
         # Try to load existing vectorstore
         self._load_existing_vectorstore()
     
     def _load_existing_vectorstore(self):
         """Try to load existing vectorstore from disk"""
+        if not self.embeddings:
+            return
+            
         try:
             if os.path.exists(self.persist_dir):
                 self.vectorstore = Chroma(
@@ -198,6 +246,10 @@ class EmbeddingsManager:
     
     def create_embeddings(self, documents: List[Document]) -> bool:
         """Create embeddings for documents and store in vector database"""
+        if not self.embeddings:
+            st.error("Embeddings not initialized")
+            return False
+            
         try:
             # Split documents into chunks
             chunks = self.text_splitter.split_documents(documents)
@@ -253,18 +305,21 @@ class CrewAIRAGSystem:
     
     def __init__(self, embeddings_manager: EmbeddingsManager):
         self.embeddings_manager = embeddings_manager
-        # Use the global groq_key variable
         self.groq_api_key = groq_key
         self.llm = None
         self.agents = {}
         self.tools = []
+        
+        if not CREWAI_AVAILABLE:
+            st.warning("⚠️ CrewAI is not available. Running in fallback mode.")
+            return
         
         if self.groq_api_key:
             try:
                 # Use Groq's LLaMA 3 with correct model name
                 self.llm = ChatGroq(
                     groq_api_key=self.groq_api_key,
-                    model="llama-3.1-8b-instant",  # Remove 'groq/' prefix
+                    model="llama-3.1-8b-instant",
                     temperature=0.7,
                     max_tokens=1500
                 )
@@ -279,7 +334,7 @@ class CrewAIRAGSystem:
     
     def _setup_agents_and_tools(self):
         """Setup CrewAI agents and tools"""
-        if not self.llm:
+        if not self.llm or not CREWAI_AVAILABLE:
             return
             
         # Create document search tool
@@ -293,7 +348,7 @@ class CrewAIRAGSystem:
             backstory="""You are a senior data architect with extensive experience in Data Vault 2.0 methodology. 
             You understand hub, link, and satellite structures, temporal aspects, and business keys. You can explain 
             complex data vault concepts in clear, actionable terms.""",
-            verbose=True,  # Enable verbose for debugging
+            verbose=False,
             allow_delegation=False,
             tools=self.tools,
             llm=self.llm
@@ -306,7 +361,7 @@ class CrewAIRAGSystem:
             backstory="""You are a VaultSpeed specialist with deep knowledge of automation tools, 
             code generation, metadata management, and deployment strategies. You help teams implement 
             efficient data vault solutions using VaultSpeed technology.""",
-            verbose=True,  # Enable verbose for debugging
+            verbose=False,
             allow_delegation=False,
             tools=self.tools,
             llm=self.llm
@@ -319,7 +374,7 @@ class CrewAIRAGSystem:
             backstory="""You are an experienced data engineer specializing in Apache Airflow. You understand 
             DAG design patterns, task dependencies, scheduling, monitoring, and integration with data vault systems. 
             You provide practical solutions for complex orchestration challenges.""",
-            verbose=True,  # Enable verbose for debugging
+            verbose=False,
             allow_delegation=False,
             tools=self.tools,
             llm=self.llm
@@ -332,72 +387,35 @@ class CrewAIRAGSystem:
             backstory="""You are a technical coordinator who excels at synthesizing information from multiple 
             expert sources. You ensure responses are comprehensive, well-organized, and address all aspects 
             of complex technical questions.""",
-            verbose=True,  # Enable verbose for debugging
+            verbose=False,
             allow_delegation=True,
             tools=self.tools,
             llm=self.llm
         )
     
-    # Add this debug version of the generate_response method to your CrewAIRAGSystem class:
-
+    def _determine_relevant_agent(self, query: str) -> str:
+        """Determine which agent is most relevant for the query"""
+        query_lower = query.lower()
+        
+        if any(keyword in query_lower for keyword in ['vaultspeed', 'automation', 'code generation', 'metadata']):
+            return 'vaultspeed_expert'
+        elif any(keyword in query_lower for keyword in ['airflow', 'dag', 'pipeline', 'orchestration', 'scheduling']):
+            return 'airflow_expert'
+        elif any(keyword in query_lower for keyword in ['data vault', 'hub', 'link', 'satellite', 'business key']):
+            return 'data_vault_expert'
+        else:
+            return 'data_vault_expert'  # Default to data vault expert
+    
     def generate_response(self, query: str, mode: str = "Overview") -> tuple[str, List[str], Dict[str, Any]]:
         """Generate response using CrewAI agents"""
-        # Simple test first
-        if not self.llm:
-            return "ERROR: No LLM found", [], {}
-    
-        if not self.agents:
-            return "ERROR: No agents found", [], {}
-    
-        try:
-            # Just test the LLM directly first
-            simple_response = self.llm.invoke(f"Answer this question about data vault: {query}")
-        
-            return f"✅ SUCCESS! LLM Response: {simple_response.content}", [], {
-                'primary_agent': 'test',
-                'agent_role': 'Direct LLM Test',
-                'mode': mode
-            }
-        
-        except Exception as e:
-            return f"ERROR in LLM call: {str(e)}", [], {}
-    
-    # Add debug information
-        st.write(f"🔍 **Debug Checks:**")
-        st.write(f"- LLM status: {self.llm is not None}")
-        st.write(f"- LLM type: {type(self.llm)}")
-        st.write(f"- Number of agents: {len(self.agents)}")
-        st.write(f"- Available agents: {list(self.agents.keys())}")
-        st.write(f"- API Key present: {bool(self.groq_api_key)}")
-    
-    # Check the condition that determines fallback
-        llm_check = self.llm is not None
-        agents_check = bool(self.agents)
-    
-        st.write(f"- LLM check result: {llm_check}")
-        st.write(f"- Agents check result: {agents_check}")
-        st.write(f"- Combined check (should be True): {llm_check and agents_check}")
-    
-        if not self.llm or not self.agents:
-            st.error("🚨 **Debug: Entering fallback mode**")
-            st.write(f"Reason: LLM={self.llm is not None}, Agents={bool(self.agents)}")
+        if not CREWAI_AVAILABLE or not self.llm or not self.agents:
             return self._fallback_response(query, mode), [], {}
-    
-        st.success("✅ **Debug: Conditions met, proceeding with CrewAI**")
-    
+        
         try:
-        # Determine the best agent for this query
+            # Determine the best agent for this query
             primary_agent = self._determine_relevant_agent(query)
-            st.write(f"🤖 **Debug: Selected agent: {primary_agent}**")
-        
-        # Check if the selected agent exists
-            if primary_agent not in self.agents:
-                st.error(f"❌ Selected agent '{primary_agent}' not found in agents!")
-                return self._fallback_response(query, mode), [], {}
-        
-            st.write(f"✅ Agent '{primary_agent}' found successfully")
-        
-        # Create task based on response mode
+            
+            # Create task based on response mode
             if mode == "Overview":
                 task_description = f"""Analyze the user query: "{query}"
             
@@ -420,63 +438,62 @@ class CrewAIRAGSystem:
                 5. Integration considerations if applicable
             
                 Provide thorough, technical depth while maintaining clarity."""
-        
-            st.write("📝 **Debug: Creating task...**")
-        
+            
             # Create and execute task
             task = Task(
-            description=task_description,
-            agent=self.agents[primary_agent],
-            expected_output="A well-structured response based on the document content and agent expertise"
+                description=task_description,
+                agent=self.agents[primary_agent],
+                expected_output="A well-structured response based on the document content and agent expertise"
             )
-            st.write("👥 **Debug: Creating crew...**")
-        
+            
             # Create crew and execute
             crew = Crew(
-            agents=[self.agents[primary_agent]],
-            tasks=[task],
-            verbose=True,  # Enable verbose for debugging
-            process=Process.sequential
+                agents=[self.agents[primary_agent]],
+                tasks=[task],
+                verbose=False,
+                process=Process.sequential
             )
-        
-            st.write("🚀 **Debug: Executing CrewAI task...**")
-        
+            
             with st.spinner("CrewAI agents processing..."):
                 result = crew.kickoff()
-        
-            st.write(f"✅ **Debug: Task completed successfully!**")
-            st.write(f"Result type: {type(result)}")
-            st.write(f"Result preview: {str(result)[:200]}...")
-        
+            
             # Extract sources from the search results
             sources = self._extract_sources_from_search()
-        
+            
             agent_info = {
-            'primary_agent': primary_agent,
-            'agent_role': self.agents[primary_agent].role,
-            'mode': mode
+                'primary_agent': primary_agent,
+                'agent_role': self.agents[primary_agent].role,
+                'mode': mode
             }
-        
+            
             return str(result), sources, agent_info
-        
+            
         except Exception as e:
-            st.error(f"💥 **Debug: CrewAI execution error occurred**")
-            st.error(f"Error: {str(e)}")
-            st.error(f"Error type: {type(e)}")
-            import traceback
-            st.error(f"Traceback: {traceback.format_exc()}")
+            st.error(f"CrewAI execution error: {str(e)}")
             return self._fallback_response(query, mode), [], {}
     
     def _extract_sources_from_search(self) -> List[str]:
         """Extract sources from recent search operations"""
-        # This would be enhanced to track sources from tool usage
-        # For now, return a placeholder
         if hasattr(st.session_state, 'recent_sources'):
             return st.session_state.recent_sources
         return []
     
     def _fallback_response(self, query: str, mode: str) -> str:
         """Fallback response when CrewAI is not available"""
+        if not CREWAI_AVAILABLE:
+            return f"""**CrewAI Not Available - Fallback Response**
+
+Your query: "{query}"
+
+**Issue**: CrewAI library is not installed or available in this environment.
+
+**To enable full CrewAI functionality:**
+1. Install required packages: `pip install crewai crewai-tools`
+2. Ensure your .env file contains: `GROQ_API_KEY=your_key_here`
+3. Restart the application
+
+**Current Status**: Operating in basic mode without specialized AI agents."""
+        
         if mode == "Overview":
             return f"""**Overview Response for: "{query}"**
 
@@ -554,9 +571,7 @@ class RAGChatbot:
     
     def generate_response(self, query: str, mode: str = "Overview") -> tuple[str, List[str], Dict[str, Any]]:
         """Generate response using CrewAI RAG system"""
-               
-        result = self.crewai_system.generate_response(query, mode)
-        return result
+        return self.crewai_system.generate_response(query, mode)
 
 def load_image_as_base64(image_path: str) -> str:
     """Load image and convert to base64 - supports both local and git paths"""
@@ -575,8 +590,7 @@ def load_image_as_base64(image_path: str) -> str:
         except Exception as e:
             continue
     
-    # If no paths work, show warning but don't error
-    st.warning(f"Image not found at either: {local_path} or {git_path}")
+    # If no paths work, return empty string (don't show warning in production)
     return ""
 
 def render_sidebar():
@@ -596,7 +610,6 @@ def render_sidebar():
                     </p>
                 </div>
             """, unsafe_allow_html=True)
-
         else:
             st.markdown("# 📚 Quick Query")
             st.markdown("*Powered by CrewAI & Groq*")
@@ -604,11 +617,16 @@ def render_sidebar():
         st.markdown("---")
         
         # Environment status
+        crewai_status = "✅ Available" if CREWAI_AVAILABLE else "❌ Not Installed"
         groq_key_status = "✅ Connected" if groq_key else "❌ Not Found"
+        
+        st.markdown(f"**CrewAI:** {crewai_status}")
         st.markdown(f"**Groq LLaMA 3:** {groq_key_status}")
         
+        if not CREWAI_AVAILABLE:
+            st.warning("⚠️ Install CrewAI for full AI agent functionality")
         if not groq_key:
-            st.warning("⚠️ Add GROQ_API_KEY to Streamlit Secrets or .env file for full functionality")
+            st.warning("⚠️ Add GROQ_API_KEY to Streamlit Secrets or .env file")
         
         st.markdown("---")
         
@@ -680,10 +698,6 @@ def render_sidebar():
             value=True,
             help="Display which CrewAI agent handled the query"
         )
-        
-        # Document status
-        if st.session_state.get('documents_loaded', False):
-            st.success(f"✅ {st.session_state.get('document_count', 0)} documents loaded")
         
         return uploaded_files, response_mode, show_sources, show_agent_info
 
@@ -788,7 +802,8 @@ def main():
             <h1>🔍 Find Answers Inside Your Documents</h1>
         </div>
         ''', unsafe_allow_html=True)
-    # --- New section for list of topics ---
+    
+    # List of topics section
     st.markdown("---")
     st.markdown("### 📚 List of Topics Available for Search")
     st.markdown("""
@@ -801,11 +816,6 @@ def main():
     - Automation in Data Vault  
     - Agile Delivery with Data Vault  
     """)
-    
-    # Handle file uploads only if new files are uploaded
-    if uploaded_files and not st.session_state.get('vectorstore_loaded', False):
-        # This will only run for new uploads, not on every rerun
-        pass
     
     # Chat interface
     chat_container = st.container()
@@ -831,7 +841,12 @@ def main():
                 st.session_state.chat_history.append(user_message)
                 
                 # Generate response
-                with st.spinner("CrewAI agents are analyzing your question using Groq LLaMA 3..."):
+                if CREWAI_AVAILABLE and groq_key:
+                    spinner_text = "CrewAI agents are analyzing your question using Groq LLaMA 3..."
+                else:
+                    spinner_text = "Processing your question..."
+                    
+                with st.spinner(spinner_text):
                     response_content, sources, agent_info = st.session_state.chatbot.generate_response(
                         user_input, response_mode
                     )
@@ -848,13 +863,35 @@ def main():
                 
                 st.rerun()
         else:
-            st.info("👆 Please upload documents using the sidebar to start chatting with CrewAI agents!")
+            st.info("👆 Please upload documents using the sidebar to start chatting!")
+            
+            # Show status of requirements
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown("**System Status:**")
+                if CREWAI_AVAILABLE:
+                    st.success("✅ CrewAI Available")
+                else:
+                    st.error("❌ CrewAI Not Installed")
+                    
+                if groq_key:
+                    st.success("✅ Groq API Key Found")
+                else:
+                    st.error("❌ Groq API Key Missing")
+            
+            with col2:
+                st.markdown("**Quick Start:**")
+                st.markdown("1. Upload PDF/DOCX/TXT files")
+                st.markdown("2. Wait for processing")
+                st.markdown("3. Start asking questions!")
     
     # Clear chat button
     if st.session_state.chat_history:
-        if st.button("🗑️ Clear Chat History"):
-            st.session_state.chat_history = []
-            st.rerun()
+        col1, col2, col3 = st.columns([1, 1, 1])
+        with col2:
+            if st.button("🗑️ Clear Chat History", use_container_width=True):
+                st.session_state.chat_history = []
+                st.rerun()
 
 if __name__ == "__main__":
     main()
