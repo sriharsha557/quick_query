@@ -41,7 +41,7 @@ if not groq_key:
 
 if not groq_key:
     st.error("No GROQ_API_KEY found. Please set it in Streamlit Secrets or .env")
-    st.stop()
+    # Don't use st.stop() - let the app continue with limited functionality
 
 # Configure page
 st.set_page_config(
@@ -932,3 +932,4 @@ def main():
                     file_name=f"chat_history_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
                     mime="application/json"
                 )
+
