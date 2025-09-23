@@ -1,3 +1,16 @@
+
+def main():
+    # TEMPORARY: Super simple test
+    st.write("Basic Streamlit Test")
+    st.write("If you see this, Streamlit is working")
+    
+    if st.button("Test Button"):
+        st.success("Button clicked successfully!")
+    
+    # Comment out everything else temporarily
+    return
+    
+"""
 import streamlit as st
 import tempfile
 import os
@@ -932,4 +945,5 @@ def main():
                     file_name=f"chat_history_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
                     mime="application/json"
                 )
+"""
 
