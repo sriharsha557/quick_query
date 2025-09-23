@@ -23,6 +23,9 @@ from langchain_community.vectorstores import FAISS
 from langchain.schema import Document
 import numpy as np
 
+# LLM import - THIS WAS MISSING!
+from langchain_groq import ChatGroq
+
 # Load environment variables
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 
@@ -179,10 +182,14 @@ class EmbeddingsManager:
                 model_name="sentence-transformers/all-MiniLM-L6-v2"
             )
         except ImportError:
-            from langchain_community.embeddings import HuggingFaceEmbeddings
-            self.embeddings = HuggingFaceEmbeddings(
-                model_name="sentence-transformers/all-MiniLM-L6-v2"
-            )
+            try:
+                from langchain_community.embeddings import HuggingFaceEmbeddings
+                self.embeddings = HuggingFaceEmbeddings(
+                    model_name="sentence-transformers/all-MiniLM-L6-v2"
+                )
+            except ImportError as e:
+                st.error(f"Could not import HuggingFaceEmbeddings: {e}")
+                self.embeddings = None
         
         self._load_existing_vectorstore()
     
@@ -200,6 +207,10 @@ class EmbeddingsManager:
     
     def create_embeddings(self, documents: List[Document]) -> bool:
         try:
+            if not self.embeddings:
+                st.error("Embeddings system not initialized")
+                return False
+                
             chunks = self.text_splitter.split_documents(documents)
             
             if not chunks:
@@ -272,17 +283,22 @@ class SimplifiedRAGSystem:
         self.initialization_error = None
         
         try:
-            # Initialize LLM
+            # Initialize LLM with better error handling
             self.llm = ChatGroq(
                 groq_api_key=self.groq_api_key,
                 model="llama-3.1-8b-instant",
                 temperature=0.7,
-                max_tokens=1500
+                max_tokens=1500,
+                timeout=30,  # Add timeout
+                max_retries=2  # Add retries
             )
             
-            # Test LLM connection
-            test_response = self.llm.invoke("Hi")
-            st.sidebar.success("✅ LLM connected successfully")
+            # Test LLM connection with a simple query
+            test_response = self.llm.invoke("Hello")
+            if hasattr(test_response, 'content'):
+                st.sidebar.success("✅ LLM connected successfully")
+            else:
+                raise Exception("Invalid response format from LLM")
             
             # Initialize document search
             self.doc_search_tool = SimpleDocumentSearchTool(embeddings_manager=self.embeddings_manager)
@@ -325,6 +341,7 @@ Instructions:
 - Cite the sources mentioned in the document content
 - If multiple sources are mentioned, reference them appropriately
 - Keep the response focused and informative
+- Use bullet points or numbered lists when appropriate for clarity
 
 Query: {query}
 """
@@ -340,6 +357,8 @@ Instructions:
 - Cross-reference information from different sources if applicable
 - Cite all sources mentioned in the document content
 - Provide implementation guidance if present in documents
+- Structure your response with clear headings and sections
+- Use examples from the documents when available
 
 Query: {query}
 """
@@ -391,6 +410,7 @@ Instructions:
 - Be accurate and helpful
 - Mention that this answer is based on general knowledge, not the uploaded documents
 - Keep the response focused and well-structured
+- Use bullet points when appropriate for clarity
 """
             else:  # Deep Dive
                 prompt = f"""Provide a comprehensive, detailed answer to the following question using your general knowledge:
@@ -403,6 +423,7 @@ Instructions:
 - Mention that this answer is based on general knowledge, not the uploaded documents
 - Structure the response clearly with good organization
 - Be thorough and informative
+- Use headings and sections for better readability
 """
             
             response = self.llm.invoke(prompt)
@@ -444,12 +465,14 @@ Mode: {mode}
 **Issue**: The RAG system is not properly initialized.
 
 **Possible Solutions:**
-1. Check your Groq API key
-2. Ensure internet connectivity
+1. Check your Groq API key configuration
+2. Ensure internet connectivity for model access
 3. Restart the application
-4. Check if all required packages are installed
+4. Verify all required packages are installed
 
-**Error Details**: {self.initialization_error or 'Unknown initialization error'}"""
+**Error Details**: {self.initialization_error or 'Unknown initialization error'}
+
+**Next Steps**: Please check the sidebar for system status and try refreshing the page."""
 
 class RAGChatbot:
     """Main RAG chatbot class with simplified system"""
@@ -467,6 +490,7 @@ class RAGChatbot:
         progress_bar = st.progress(0)
         
         for i, uploaded_file in enumerate(uploaded_files):
+            st.write(f"Processing: {uploaded_file.name}")
             filename, text = DocumentProcessor.process_uploaded_file(uploaded_file)
             
             if text.strip():
@@ -475,6 +499,8 @@ class RAGChatbot:
                     metadata={"source": filename, "upload_time": datetime.now().isoformat()}
                 )
                 documents.append(doc)
+            else:
+                st.warning(f"No text extracted from {filename}")
             
             progress_bar.progress((i + 1) / len(uploaded_files))
         
@@ -484,8 +510,10 @@ class RAGChatbot:
                 st.session_state.documents_loaded = True
                 st.session_state.document_count = self.embeddings_manager.get_document_count()
                 st.session_state.recent_sources = [doc.metadata['source'] for doc in documents]
+                st.success(f"✅ Successfully processed {len(documents)} documents!")
                 return True
         
+        st.error("❌ No documents were successfully processed")
         return False
     
     def clear_all_documents(self) -> bool:
@@ -522,7 +550,7 @@ def load_image_as_base64(image_path: str) -> str:
         except Exception as e:
             continue
     
-    st.warning(f"Image not found at either: {local_path} or {git_path}")
+    # Don't show warning for missing images in production
     return ""
 
 def render_sidebar():
@@ -556,16 +584,23 @@ def render_sidebar():
         
         st.markdown("---")
         
-        # Document management (same as before)
-        st.markdown("### 📁 Document Management")
+        # Document management
+        st.markdown("### 📄 Document Management")
         
         if st.session_state.get('documents_loaded', False):
             doc_count = st.session_state.get('document_count', 0)
             st.success(f"✅ {doc_count} document chunks loaded")
             
+            # Show recent sources
+            recent_sources = st.session_state.get('recent_sources', [])
+            if recent_sources:
+                st.markdown("**Recent uploads:**")
+                for source in recent_sources[:3]:  # Show max 3
+                    st.markdown(f"• {source}")
+            
             col1, col2 = st.columns(2)
             with col1:
-                if st.button("🗑️ Clear All Documents"):
+                if st.button("🗑️ Clear All"):
                     if st.session_state.chatbot.clear_all_documents():
                         st.success("Documents cleared!")
                         st.rerun()
@@ -573,7 +608,7 @@ def render_sidebar():
                         st.error("Failed to clear documents")
             
             with col2:
-                if st.button("📤 Add More Documents"):
+                if st.button("📤 Add More"):
                     st.session_state.show_uploader = True
                     st.rerun()
         
@@ -591,11 +626,8 @@ def render_sidebar():
                     with st.spinner("Processing documents..."):
                         success = st.session_state.chatbot.load_documents(uploaded_files)
                         if success:
-                            st.success("Documents processed!")
                             st.session_state.show_uploader = False
                             st.rerun()
-                        else:
-                            st.error("Failed to process documents")
         else:
             uploaded_files = None
         
@@ -620,8 +652,10 @@ def render_sidebar():
             help="Display system information"
         )
         
+        # Performance info
         if st.session_state.get('documents_loaded', False):
-            st.info(f"📄 {st.session_state.get('document_count', 0)} chunks loaded")
+            doc_count = st.session_state.get('document_count', 0)
+            st.info(f"📄 {doc_count} chunks loaded")
         
         return uploaded_files, response_mode, show_sources, show_agent_info
 
@@ -696,6 +730,15 @@ def main():
         padding: 15px;
         margin: 10px 0;
     }
+    .stButton > button {
+        border-radius: 5px;
+        border: 1px solid #ddd;
+        transition: all 0.3s;
+    }
+    .stButton > button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+    }
     </style>
     """, unsafe_allow_html=True)
     
@@ -727,13 +770,15 @@ def main():
     
     st.markdown("---")
     st.markdown("### 📚 How It Works")
-    st.markdown("""
-    **Step 1:** Upload documents (PDF, DOCX, TXT)  
-    **Step 2:** Ask questions about your content  
-    **Step 3:** Get answers from documents or general knowledge  
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown("**Step 1: Upload**  \n📄 Upload documents (PDF, DOCX, TXT)")
+    with col2:
+        st.markdown("**Step 2: Ask**  \n❓ Ask questions about your content")
+    with col3:
+        st.markdown("**Step 3: Get Answers**  \n💡 Get answers from documents or general knowledge")
     
-    **✨ Simplified System:** Streamlined RAG without CrewAI complexity
-    """)
+    st.markdown("---")
     
     # Chat interface
     chat_container = st.container()
@@ -837,18 +882,53 @@ def main():
                     
                     st.rerun()
         else:
-            st.info("Please upload documents using the sidebar to start chatting!")
+            st.info("👆 Please upload documents using the sidebar to start chatting!")
+            
+            # Show example questions when no documents are loaded
+            st.markdown("### 💡 Example Questions You Can Ask:")
+            example_questions = [
+                "What are the main topics covered in this document?",
+                "Can you summarize the key findings?",
+                "What recommendations are mentioned?",
+                "Are there any specific dates or numbers mentioned?",
+                "What is the conclusion of this document?"
+            ]
+            
+            for i, question in enumerate(example_questions, 1):
+                st.markdown(f"{i}. *{question}*")
     
-    # Clear chat button
+    # Footer with clear chat and statistics
     if st.session_state.chat_history:
-        if st.button("Clear Chat History"):
-            st.session_state.chat_history = []
-            st.session_state.awaiting_llm_confirmation = False
-            st.session_state.pending_query = ""
-            st.session_state.pending_mode = ""
-            st.rerun()
-
-if __name__ == "__main__":
-    main()
-
-
+        col1, col2, col3 = st.columns([2, 1, 1])
+        
+        with col1:
+            st.markdown(f"**💬 Chat History:** {len(st.session_state.chat_history)} messages")
+        
+        with col2:
+            if st.button("🔄 New Chat"):
+                st.session_state.chat_history = []
+                st.session_state.awaiting_llm_confirmation = False
+                st.session_state.pending_query = ""
+                st.session_state.pending_mode = ""
+                st.rerun()
+        
+        with col3:
+            # Export chat option
+            if st.button("📥 Export Chat"):
+                chat_export = []
+                for msg in st.session_state.chat_history:
+                    chat_export.append({
+                        "role": msg.role,
+                        "content": msg.content,
+                        "timestamp": msg.timestamp.isoformat(),
+                        "sources": msg.sources
+                    })
+                
+                import json
+                chat_json = json.dumps(chat_export, indent=2)
+                st.download_button(
+                    label="Download Chat History",
+                    data=chat_json,
+                    file_name=f"chat_history_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                    mime="application/json"
+                )
