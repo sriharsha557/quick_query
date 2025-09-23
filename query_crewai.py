@@ -1,12 +1,20 @@
 import streamlit as st
 import tempfile
 import os
+import sys
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 from datetime import datetime
 import base64
 import io
 from dotenv import load_dotenv
+
+# SQLite fix for Streamlit Cloud
+try:
+    import pysqlite3
+    sys.modules['sqlite3'] = pysqlite3
+except ImportError:
+    pass
 
 # Check for required dependencies and show helpful error messages
 missing_deps = []
@@ -16,7 +24,9 @@ import_errors = {}
 try:
     from langchain_groq import ChatGroq
     from langchain.embeddings import HuggingFaceEmbeddings
+    LANGCHAIN_AVAILABLE = True
 except ImportError as e:
+    LANGCHAIN_AVAILABLE = False
     missing_deps.append("langchain-groq")
     import_errors["langchain"] = str(e)
 
@@ -35,11 +45,29 @@ try:
     import PyPDF2
     import docx
     from langchain.text_splitter import RecursiveCharacterTextSplitter
-    from langchain.vectorstores import Chroma
     from langchain.schema import Document
+    DOCUMENT_PROCESSING_AVAILABLE = True
 except ImportError as e:
+    DOCUMENT_PROCESSING_AVAILABLE = False
     missing_deps.append("document-processing")
     import_errors["docs"] = str(e)
+
+# Vector store imports with fallback options
+VECTORSTORE_TYPE = None
+try:
+    from langchain.vectorstores import Chroma
+    VECTORSTORE_TYPE = "chroma"
+    CHROMA_AVAILABLE = True
+except ImportError:
+    CHROMA_AVAILABLE = False
+    try:
+        from langchain.vectorstores import FAISS
+        VECTORSTORE_TYPE = "faiss"
+        FAISS_AVAILABLE = True
+    except ImportError:
+        FAISS_AVAILABLE = False
+        missing_deps.append("vector-stores")
+        import_errors["vectorstore"] = "Neither Chroma nor FAISS available"
 
 # Show dependency errors at the top of the app
 if missing_deps:
@@ -50,19 +78,38 @@ if missing_deps:
         st.markdown("""
         **For local development:**
         ```bash
-        pip install crewai crewai-tools langchain-groq chromadb sentence-transformers PyPDF2 python-docx
+        pip install crewai crewai-tools langchain-groq sentence-transformers PyPDF2 python-docx
+        
+        # For SQLite issues, also install:
+        pip install pysqlite3-binary
+        
+        # Alternative vector store:
+        pip install faiss-cpu
         ```
         
         **For Streamlit Cloud deployment:**
         1. Update your `requirements.txt` file with the packages shown in the artifact above
-        2. Redeploy your app
+        2. Make sure `pysqlite3-binary>=0.5.0` is included for SQLite compatibility
+        3. Redeploy your app
         
         **Missing packages details:**
         """)
         for pkg, error in import_errors.items():
             st.code(f"{pkg}: {error}")
+        
+        # Show vector store status
+        st.markdown("**Vector Store Status:**")
+        if VECTORSTORE_TYPE:
+            st.success(f"✅ Using {VECTORSTORE_TYPE.upper()} for document storage")
+        else:
+            st.error("❌ No vector store available (need Chroma or FAISS)")
     
-    st.stop()
+    if not VECTORSTORE_TYPE:
+        st.stop()
+
+# Show vector store selection info
+if VECTORSTORE_TYPE:
+    st.info(f"📊 Using {VECTORSTORE_TYPE.upper()} for document embeddings storage")
 
 # Load environment variables
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
@@ -202,17 +249,19 @@ class DocumentProcessor:
             os.unlink(tmp_path)
 
 class EmbeddingsManager:
-    """Handles document embeddings and vector storage using free HuggingFace embeddings"""
+    """Handles document embeddings and vector storage with fallback options"""
     
     def __init__(self):
         self.vectorstore = None
-        self.persist_dir = "./chroma_db"
+        self.vectorstore_type = VECTORSTORE_TYPE
+        self.persist_dir = "./vector_db"
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=1000,
             chunk_overlap=200,
             length_function=len
         )
-        # Use free HuggingFace embeddings instead of OpenAI
+        
+        # Initialize embeddings
         try:
             self.embeddings = HuggingFaceEmbeddings(
                 model_name="sentence-transformers/all-MiniLM-L6-v2"
@@ -220,72 +269,113 @@ class EmbeddingsManager:
         except Exception as e:
             st.error(f"Failed to initialize embeddings: {e}")
             self.embeddings = None
+            return
         
         # Try to load existing vectorstore
         self._load_existing_vectorstore()
     
     def _load_existing_vectorstore(self):
         """Try to load existing vectorstore from disk"""
-        if not self.embeddings:
+        if not self.embeddings or not self.vectorstore_type:
             return
             
         try:
-            if os.path.exists(self.persist_dir):
-                self.vectorstore = Chroma(
-                    persist_directory=self.persist_dir,
-                    embedding_function=self.embeddings
-                )
-                # Check if it has documents
-                collection = self.vectorstore._collection
-                if collection.count() > 0:
-                    st.session_state.documents_loaded = True
-                    st.session_state.document_count = collection.count()
-                    st.session_state.vectorstore_loaded = True
+            if self.vectorstore_type == "chroma":
+                if os.path.exists(self.persist_dir):
+                    self.vectorstore = Chroma(
+                        persist_directory=self.persist_dir,
+                        embedding_function=self.embeddings
+                    )
+                    # Check if it has documents
+                    try:
+                        collection = self.vectorstore._collection
+                        if collection.count() > 0:
+                            st.session_state.documents_loaded = True
+                            st.session_state.document_count = collection.count()
+                            st.session_state.vectorstore_loaded = True
+                    except:
+                        pass
+                        
+            elif self.vectorstore_type == "faiss":
+                faiss_index_path = os.path.join(self.persist_dir, "index.faiss")
+                faiss_pkl_path = os.path.join(self.persist_dir, "index.pkl")
+                if os.path.exists(faiss_index_path) and os.path.exists(faiss_pkl_path):
+                    self.vectorstore = FAISS.load_local(self.persist_dir, self.embeddings)
+                    # Estimate document count (FAISS doesn't have direct count method)
+                    if hasattr(self.vectorstore, 'index') and self.vectorstore.index.ntotal > 0:
+                        st.session_state.documents_loaded = True
+                        st.session_state.document_count = self.vectorstore.index.ntotal
+                        st.session_state.vectorstore_loaded = True
+                        
         except Exception as e:
-            st.warning(f"Could not load existing documents: {e}")
+            st.warning(f"Could not load existing documents ({self.vectorstore_type}): {e}")
     
     def create_embeddings(self, documents: List[Document]) -> bool:
         """Create embeddings for documents and store in vector database"""
-        if not self.embeddings:
-            st.error("Embeddings not initialized")
+        if not self.embeddings or not self.vectorstore_type:
+            st.error("Embeddings or vector store not initialized")
             return False
             
         try:
             # Split documents into chunks
             chunks = self.text_splitter.split_documents(documents)
             
-            # Create or update vector store with persistence
-            if self.vectorstore is None:
-                self.vectorstore = Chroma.from_documents(
-                    documents=chunks,
-                    embedding=self.embeddings,
-                    persist_directory=self.persist_dir
-                )
-            else:
-                # Add to existing vectorstore
-                self.vectorstore.add_documents(chunks)
-            
-            # Persist to disk
-            self.vectorstore.persist()
+            if self.vectorstore_type == "chroma":
+                # Create or update Chroma vector store with persistence
+                if self.vectorstore is None:
+                    self.vectorstore = Chroma.from_documents(
+                        documents=chunks,
+                        embedding=self.embeddings,
+                        persist_directory=self.persist_dir
+                    )
+                else:
+                    # Add to existing vectorstore
+                    self.vectorstore.add_documents(chunks)
+                
+                # Persist to disk
+                self.vectorstore.persist()
+                
+            elif self.vectorstore_type == "faiss":
+                # Create or update FAISS vector store
+                if self.vectorstore is None:
+                    self.vectorstore = FAISS.from_documents(chunks, self.embeddings)
+                else:
+                    # Add to existing vectorstore
+                    new_vectorstore = FAISS.from_documents(chunks, self.embeddings)
+                    self.vectorstore.merge_from(new_vectorstore)
+                
+                # Save to disk
+                os.makedirs(self.persist_dir, exist_ok=True)
+                self.vectorstore.save_local(self.persist_dir)
             
             return True
+            
         except Exception as e:
-            st.error(f"Error creating embeddings: {str(e)}")
+            st.error(f"Error creating embeddings ({self.vectorstore_type}): {str(e)}")
             return False
     
     def similarity_search(self, query: str, k: int = 5) -> List[Document]:
         """Search for similar documents"""
         if self.vectorstore:
-            return self.vectorstore.similarity_search(query, k=k)
+            try:
+                return self.vectorstore.similarity_search(query, k=k)
+            except Exception as e:
+                st.error(f"Error searching documents: {e}")
+                return []
         return []
     
     def get_document_count(self) -> int:
         """Get the number of documents in the vectorstore"""
-        if self.vectorstore:
-            try:
+        if not self.vectorstore:
+            return 0
+            
+        try:
+            if self.vectorstore_type == "chroma":
                 return self.vectorstore._collection.count()
-            except:
-                return 0
+            elif self.vectorstore_type == "faiss":
+                return self.vectorstore.index.ntotal if hasattr(self.vectorstore, 'index') else 0
+        except:
+            pass
         return 0
     
     def clear_documents(self) -> bool:
@@ -619,14 +709,18 @@ def render_sidebar():
         # Environment status
         crewai_status = "✅ Available" if CREWAI_AVAILABLE else "❌ Not Installed"
         groq_key_status = "✅ Connected" if groq_key else "❌ Not Found"
+        vectorstore_status = f"✅ {VECTORSTORE_TYPE.upper()}" if VECTORSTORE_TYPE else "❌ Not Available"
         
         st.markdown(f"**CrewAI:** {crewai_status}")
         st.markdown(f"**Groq LLaMA 3:** {groq_key_status}")
+        st.markdown(f"**Vector Store:** {vectorstore_status}")
         
         if not CREWAI_AVAILABLE:
             st.warning("⚠️ Install CrewAI for full AI agent functionality")
         if not groq_key:
             st.warning("⚠️ Add GROQ_API_KEY to Streamlit Secrets or .env file")
+        if not VECTORSTORE_TYPE:
+            st.error("⚠️ No vector database available - install Chroma or FAISS")
         
         st.markdown("---")
         
