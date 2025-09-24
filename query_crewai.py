@@ -2,141 +2,60 @@ import streamlit as st
 import tempfile
 import os
 import sys
+try:
+    import pysqlite3
+    sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+except ImportError:
+    import sqlite3
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 from datetime import datetime
 import base64
 import io
-from dotenv import load_dotenv
+import pickle
 
-# SQLite fix for Streamlit Cloud
-try:
-    import pysqlite3
-    sys.modules['sqlite3'] = pysqlite3
-except ImportError:
-    pass
-
-# Check for required dependencies and show helpful error messages
-missing_deps = []
-import_errors = {}
-
-# Core LLM imports with error handling
-try:
-    from langchain_groq import ChatGroq
-    from langchain.embeddings import HuggingFaceEmbeddings
-    LANGCHAIN_AVAILABLE = True
-except ImportError as e:
-    LANGCHAIN_AVAILABLE = False
-    missing_deps.append("langchain-groq")
-    import_errors["langchain"] = str(e)
-
-# CrewAI imports with error handling
-try:
-    from crewai import Agent, Task, Crew, Process
-    from crewai.tools import BaseTool
-    CREWAI_AVAILABLE = True
-except ImportError as e:
-    CREWAI_AVAILABLE = False
-    missing_deps.append("crewai")
-    import_errors["crewai"] = str(e)
+# CrewAI and LLM imports
+from crewai import Agent, Task, Crew, Process
+from crewai.tools import BaseTool
+from langchain_groq import ChatGroq
+from langchain_huggingface import HuggingFaceEmbeddings
 
 # Document processing imports
-try:
-    import PyPDF2
-    import docx
-    from langchain.text_splitter import RecursiveCharacterTextSplitter
-    from langchain.schema import Document
-    DOCUMENT_PROCESSING_AVAILABLE = True
-except ImportError as e:
-    DOCUMENT_PROCESSING_AVAILABLE = False
-    missing_deps.append("document-processing")
-    import_errors["docs"] = str(e)
-
-# Vector store imports with fallback options
-VECTORSTORE_TYPE = None
-try:
-    from langchain.vectorstores import Chroma
-    VECTORSTORE_TYPE = "chroma"
-    CHROMA_AVAILABLE = True
-except ImportError:
-    CHROMA_AVAILABLE = False
-    try:
-        from langchain.vectorstores import FAISS
-        VECTORSTORE_TYPE = "faiss"
-        FAISS_AVAILABLE = True
-    except ImportError:
-        FAISS_AVAILABLE = False
-        missing_deps.append("vector-stores")
-        import_errors["vectorstore"] = "Neither Chroma nor FAISS available"
-
-# Show dependency errors at the top of the app
-if missing_deps:
-    st.error("🚨 **Missing Required Dependencies**")
-    st.error(f"The following packages are not installed: {', '.join(missing_deps)}")
-    
-    with st.expander("📋 Installation Instructions", expanded=True):
-        st.markdown("""
-        **For local development:**
-        ```bash
-        pip install crewai crewai-tools langchain-groq sentence-transformers PyPDF2 python-docx
-        
-        # For SQLite issues, also install:
-        pip install pysqlite3-binary
-        
-        # Alternative vector store:
-        pip install faiss-cpu
-        ```
-        
-        **For Streamlit Cloud deployment:**
-        1. Update your `requirements.txt` file with the packages shown in the artifact above
-        2. Make sure `pysqlite3-binary>=0.5.0` is included for SQLite compatibility
-        3. Redeploy your app
-        
-        **Missing packages details:**
-        """)
-        for pkg, error in import_errors.items():
-            st.code(f"{pkg}: {error}")
-        
-        # Show vector store status
-        st.markdown("**Vector Store Status:**")
-        if VECTORSTORE_TYPE:
-            st.success(f"✅ Using {VECTORSTORE_TYPE.upper()} for document storage")
-        else:
-            st.error("❌ No vector store available (need Chroma or FAISS)")
-    
-    if not VECTORSTORE_TYPE:
-        st.stop()
-
-# Show vector store selection info
-if VECTORSTORE_TYPE:
-    st.info(f"📊 Using {VECTORSTORE_TYPE.upper()} for document embeddings storage")
-
-# Load environment variables
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
-
-# Prefer Streamlit Cloud secrets, fallback to local .env with proper error handling
-try:
-    groq_key = st.secrets.get("GROQ_API_KEY")
-except Exception:
-    groq_key = None
-
-# If secrets not found, try .env
-if not groq_key:
-    groq_key = os.getenv("GROQ_API_KEY")
-
-if not groq_key:
-    st.error("❌ No GROQ_API_KEY found. Please set it in Streamlit Secrets or .env")
-    st.info("For Streamlit Cloud: Add GROQ_API_KEY to your app secrets")
-    st.info("For local development: Add GROQ_API_KEY to your .env file")
-    st.stop()
+import PyPDF2
+import docx
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import FAISS
+from langchain.schema import Document
+import numpy as np
 
 # Configure page
 st.set_page_config(
     page_title="Quick Query",
-    page_icon="🔍",
+    page_icon="📚",
     layout="centered",
     initial_sidebar_state="expanded"
 )
+
+# API Key Configuration - Streamlit Cloud compatible
+def get_groq_api_key():
+    """Get Groq API key from Streamlit secrets or environment"""
+    try:
+        # Try Streamlit secrets first (for Streamlit Cloud)
+        if hasattr(st, 'secrets') and "GROQ_API_KEY" in st.secrets:
+            return st.secrets["GROQ_API_KEY"]
+    except Exception:
+        pass
+    
+    # Fallback to environment variable
+    return os.getenv("GROQ_API_KEY")
+
+groq_key = get_groq_api_key()
+
+if not groq_key:
+    st.error("⚠ No GROQ_API_KEY found. Please set it in Streamlit Secrets or environment variables")
+    st.info("For Streamlit Cloud: Add GROQ_API_KEY to your app secrets")
+    st.info("For local development: Add GROQ_API_KEY as an environment variable")
+    st.stop()
 
 @dataclass
 class ChatMessage:
@@ -246,145 +165,170 @@ class DocumentProcessor:
             return filename, text
         finally:
             # Clean up temporary file
-            os.unlink(tmp_path)
+            try:
+                os.unlink(tmp_path)
+            except:
+                pass
 
 class EmbeddingsManager:
-    """Handles document embeddings and vector storage with fallback options"""
+    """Handles document embeddings and vector storage using FAISS"""
     
     def __init__(self):
         self.vectorstore = None
-        self.vectorstore_type = VECTORSTORE_TYPE
-        self.persist_dir = "./vector_db"
+        self.documents_metadata = []
+        self.document_topics = []  # Store extracted topics
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=1000,
             chunk_overlap=200,
             length_function=len
         )
-        
-        # Initialize embeddings
+        # Use HuggingFace embeddings
         try:
             self.embeddings = HuggingFaceEmbeddings(
                 model_name="sentence-transformers/all-MiniLM-L6-v2"
             )
         except Exception as e:
-            st.error(f"Failed to initialize embeddings: {e}")
+            st.error(f"Error initializing embeddings: {e}")
             self.embeddings = None
-            return
         
-        # Try to load existing vectorstore
+        # Try to load existing vectorstore from session state
         self._load_existing_vectorstore()
     
     def _load_existing_vectorstore(self):
-        """Try to load existing vectorstore from disk"""
-        if not self.embeddings or not self.vectorstore_type:
-            return
-            
+        """Try to load existing vectorstore from session state"""
         try:
-            if self.vectorstore_type == "chroma":
-                if os.path.exists(self.persist_dir):
-                    self.vectorstore = Chroma(
-                        persist_directory=self.persist_dir,
-                        embedding_function=self.embeddings
-                    )
-                    # Check if it has documents
-                    try:
-                        collection = self.vectorstore._collection
-                        if collection.count() > 0:
-                            st.session_state.documents_loaded = True
-                            st.session_state.document_count = collection.count()
-                            st.session_state.vectorstore_loaded = True
-                    except:
-                        pass
-                        
-            elif self.vectorstore_type == "faiss":
-                faiss_index_path = os.path.join(self.persist_dir, "index.faiss")
-                faiss_pkl_path = os.path.join(self.persist_dir, "index.pkl")
-                if os.path.exists(faiss_index_path) and os.path.exists(faiss_pkl_path):
-                    self.vectorstore = FAISS.load_local(self.persist_dir, self.embeddings)
-                    # Estimate document count (FAISS doesn't have direct count method)
-                    if hasattr(self.vectorstore, 'index') and self.vectorstore.index.ntotal > 0:
-                        st.session_state.documents_loaded = True
-                        st.session_state.document_count = self.vectorstore.index.ntotal
-                        st.session_state.vectorstore_loaded = True
-                        
+            if 'faiss_vectorstore' in st.session_state and 'documents_metadata' in st.session_state:
+                self.vectorstore = st.session_state['faiss_vectorstore']
+                self.documents_metadata = st.session_state['documents_metadata']
+                self.document_topics = st.session_state.get('document_topics', [])
+                if self.vectorstore is not None:
+                    st.session_state.documents_loaded = True
+                    st.session_state.document_count = len(self.documents_metadata)
+                    st.session_state.vectorstore_loaded = True
         except Exception as e:
-            st.warning(f"Could not load existing documents ({self.vectorstore_type}): {e}")
+            st.warning(f"Could not load existing documents: {e}")
+    
+    def extract_document_titles(self, documents: List[Document]) -> List[str]:
+        """Extract document titles from filenames and metadata"""
+        titles = []
+        seen_titles = set()
+        
+        for doc in documents:
+            # Get filename from metadata
+            filename = doc.metadata.get('source', 'Unknown Document')
+            
+            # Clean up the filename to create a nice title
+            title = self.clean_filename_to_title(filename)
+            
+            # Avoid duplicates
+            if title not in seen_titles:
+                titles.append(title)
+                seen_titles.add(title)
+        
+        return titles
+    
+    def clean_filename_to_title(self, filename: str) -> str:
+        """Convert filename to a clean, readable title"""
+        # Remove file extension
+        title = filename.split('.')[0] if '.' in filename else filename
+        
+        # Replace underscores and hyphens with spaces
+        title = title.replace('_', ' ').replace('-', ' ')
+        
+        # Capitalize each word
+        title = ' '.join(word.capitalize() for word in title.split())
+        
+        # Handle common abbreviations and acronyms
+        title = title.replace(' Api ', ' API ')
+        title = title.replace(' Sql ', ' SQL ')
+        title = title.replace(' Pdf ', ' PDF ')
+        title = title.replace(' Json ', ' JSON ')
+        title = title.replace(' Xml ', ' XML ')
+        title = title.replace(' Html ', ' HTML ')
+        title = title.replace(' Csv ', ' CSV ')
+        
+        return title
     
     def create_embeddings(self, documents: List[Document]) -> bool:
-        """Create embeddings for documents and store in vector database"""
-        if not self.embeddings or not self.vectorstore_type:
-            st.error("Embeddings or vector store not initialized")
+        """Create embeddings for documents and store in FAISS vector database"""
+        if not self.embeddings:
+            st.error("Embeddings model not available")
             return False
             
         try:
+            # Extract document titles instead of topics
+            titles = self.extract_document_titles(documents)
+            
             # Split documents into chunks
             chunks = self.text_splitter.split_documents(documents)
             
-            if self.vectorstore_type == "chroma":
-                # Create or update Chroma vector store with persistence
-                if self.vectorstore is None:
-                    self.vectorstore = Chroma.from_documents(
-                        documents=chunks,
-                        embedding=self.embeddings,
-                        persist_directory=self.persist_dir
-                    )
-                else:
-                    # Add to existing vectorstore
-                    self.vectorstore.add_documents(chunks)
-                
-                # Persist to disk
-                self.vectorstore.persist()
-                
-            elif self.vectorstore_type == "faiss":
-                # Create or update FAISS vector store
-                if self.vectorstore is None:
-                    self.vectorstore = FAISS.from_documents(chunks, self.embeddings)
-                else:
-                    # Add to existing vectorstore
-                    new_vectorstore = FAISS.from_documents(chunks, self.embeddings)
-                    self.vectorstore.merge_from(new_vectorstore)
-                
-                # Save to disk
-                os.makedirs(self.persist_dir, exist_ok=True)
-                self.vectorstore.save_local(self.persist_dir)
+            if not chunks:
+                st.error("No text chunks created from documents")
+                return False
+            
+            # Create or update vector store
+            if self.vectorstore is None:
+                self.vectorstore = FAISS.from_documents(
+                    documents=chunks,
+                    embedding=self.embeddings
+                )
+                self.documents_metadata = [doc.metadata for doc in chunks]
+                self.document_topics = titles  # Store titles as "topics"
+            else:
+                # Add to existing vectorstore
+                new_vectorstore = FAISS.from_documents(
+                    documents=chunks,
+                    embedding=self.embeddings
+                )
+                self.vectorstore.merge_from(new_vectorstore)
+                self.documents_metadata.extend([doc.metadata for doc in chunks])
+                # Merge titles, keeping unique ones
+                self.document_topics = list(set(self.document_topics + titles))
+            
+            # Store in session state for persistence within session
+            st.session_state['faiss_vectorstore'] = self.vectorstore
+            st.session_state['documents_metadata'] = self.documents_metadata
+            st.session_state['document_topics'] = self.document_topics
             
             return True
-            
         except Exception as e:
-            st.error(f"Error creating embeddings ({self.vectorstore_type}): {str(e)}")
+            st.error(f"Error creating embeddings: {str(e)}")
             return False
     
     def similarity_search(self, query: str, k: int = 5) -> List[Document]:
         """Search for similar documents"""
         if self.vectorstore:
             try:
-                return self.vectorstore.similarity_search(query, k=k)
+                results = self.vectorstore.similarity_search(query, k=k)
+                return results
             except Exception as e:
-                st.error(f"Error searching documents: {e}")
+                st.error(f"Error in similarity search: {e}")
                 return []
         return []
     
     def get_document_count(self) -> int:
         """Get the number of documents in the vectorstore"""
-        if not self.vectorstore:
-            return 0
-            
-        try:
-            if self.vectorstore_type == "chroma":
-                return self.vectorstore._collection.count()
-            elif self.vectorstore_type == "faiss":
-                return self.vectorstore.index.ntotal if hasattr(self.vectorstore, 'index') else 0
-        except:
-            pass
-        return 0
+        return len(self.documents_metadata) if self.documents_metadata else 0
+    
+    def get_document_topics(self) -> List[str]:
+        """Get document titles (stored as topics)"""
+        return self.document_topics if hasattr(self, 'document_topics') else []
     
     def clear_documents(self) -> bool:
         """Clear all stored documents"""
         try:
-            if os.path.exists(self.persist_dir):
-                import shutil
-                shutil.rmtree(self.persist_dir)
             self.vectorstore = None
+            self.documents_metadata = []
+            self.document_topics = []
+            
+            # Clear from session state
+            if 'faiss_vectorstore' in st.session_state:
+                del st.session_state['faiss_vectorstore']
+            if 'documents_metadata' in st.session_state:
+                del st.session_state['documents_metadata']
+            if 'document_topics' in st.session_state:
+                del st.session_state['document_topics']
+            
             return True
         except Exception as e:
             st.error(f"Error clearing documents: {e}")
@@ -399,107 +343,144 @@ class CrewAIRAGSystem:
         self.llm = None
         self.agents = {}
         self.tools = []
-        
-        if not CREWAI_AVAILABLE:
-            st.warning("⚠️ CrewAI is not available. Running in fallback mode.")
-            return
+        self.initialization_error = None
         
         if self.groq_api_key:
             try:
-                # Use Groq's LLaMA 3 with correct model name
+                # Try with explicit provider specification
+                from langchain_groq import ChatGroq
+                
+                # Method 1: Standard ChatGroq initialization
                 self.llm = ChatGroq(
                     groq_api_key=self.groq_api_key,
-                    model="llama-3.1-8b-instant",
+                    model_name="groq/llama-3.1-8b-instant",  # Use model_name parameter
                     temperature=0.7,
                     max_tokens=1500
                 )
-                # Test the connection by making a simple call
-                test_response = self.llm.invoke("Hello")
-                print(f"LLM initialized successfully: {test_response.content[:50]}...")
+                
+                # Test the connection with a simple prompt
+                print("Testing Groq connection...")
+                test_response = self.llm.invoke("Test")
+                print(f"Connection test successful: {test_response.content[:50]}...")
                 self._setup_agents_and_tools()
+                print("CrewAI agents setup completed successfully")
+                
             except Exception as e:
-                print(f"Error initializing LLM: {e}")
-                st.error(f"Failed to initialize Groq LLM: {e}")
-                self.llm = None
+                # Method 2: Try with different parameter names
+                try:
+                    print("Trying with different parameter configuration...")
+                    self.llm = ChatGroq(
+                        api_key=self.groq_api_key,  # Try api_key instead of groq_api_key
+                        model="groq/llama-3.1-8b-instant",
+                        temperature=0.7,
+                        max_tokens=1500
+                    )
+                    test_response = self.llm.invoke("Test")
+                    print(f"Second method successful: {test_response.content[:50]}...")
+                    self._setup_agents_and_tools()
+                    print("CrewAI agents setup completed with second method")
+                    
+                except Exception as e2:
+                    # Method 3: Try with CrewAI's LLM wrapper
+                    try:
+                        print("Trying with CrewAI LLM wrapper...")
+                        from crewai import LLM
+                        
+                        self.llm = LLM(
+                            model="groq/llama-3.1-8b-instant",
+                            api_key=self.groq_api_key
+                        )
+                        # Skip test for CrewAI LLM wrapper as it might not have invoke method
+                        self._setup_agents_and_tools()
+                        print("CrewAI agents setup completed with CrewAI LLM wrapper")
+                        
+                    except Exception as e3:
+                        error_msg = f"Failed with all methods: {str(e)} | {str(e2)} | {str(e3)}"
+                        print(f"CrewAI initialization error: {error_msg}")
+                        self.initialization_error = error_msg
+                        self.llm = None
+        else:
+            self.initialization_error = "No Groq API key provided"
     
     def _setup_agents_and_tools(self):
         """Setup CrewAI agents and tools"""
-        if not self.llm or not CREWAI_AVAILABLE:
+        if not self.llm:
             return
             
-        # Create document search tool
-        doc_search_tool = DocumentSearchTool(embeddings_manager=self.embeddings_manager)
-        self.tools = [doc_search_tool]
-        
-        # Data Vault Expert Agent
-        self.agents['data_vault_expert'] = Agent(
-            role='Data Vault 2.0 Expert',
-            goal='Provide accurate and detailed information about Data Vault 2.0 methodology, architecture, and best practices',
-            backstory="""You are a senior data architect with extensive experience in Data Vault 2.0 methodology. 
-            You understand hub, link, and satellite structures, temporal aspects, and business keys. You can explain 
-            complex data vault concepts in clear, actionable terms.""",
-            verbose=False,
-            allow_delegation=False,
-            tools=self.tools,
-            llm=self.llm
-        )
-        
-        # VaultSpeed Expert Agent
-        self.agents['vaultspeed_expert'] = Agent(
-            role='VaultSpeed Specialist',
-            goal='Provide expert guidance on VaultSpeed automation, configuration, and implementation',
-            backstory="""You are a VaultSpeed specialist with deep knowledge of automation tools, 
-            code generation, metadata management, and deployment strategies. You help teams implement 
-            efficient data vault solutions using VaultSpeed technology.""",
-            verbose=False,
-            allow_delegation=False,
-            tools=self.tools,
-            llm=self.llm
-        )
-        
-        # Airflow Expert Agent
-        self.agents['airflow_expert'] = Agent(
-            role='Apache Airflow Expert',
-            goal='Provide comprehensive guidance on Airflow orchestration, DAGs, and data pipeline management',
-            backstory="""You are an experienced data engineer specializing in Apache Airflow. You understand 
-            DAG design patterns, task dependencies, scheduling, monitoring, and integration with data vault systems. 
-            You provide practical solutions for complex orchestration challenges.""",
-            verbose=False,
-            allow_delegation=False,
-            tools=self.tools,
-            llm=self.llm
-        )
-        
-        # Research Coordinator Agent
-        self.agents['coordinator'] = Agent(
-            role='Technical Research Coordinator',
-            goal='Coordinate research across different domains and provide comprehensive, well-structured responses',
-            backstory="""You are a technical coordinator who excels at synthesizing information from multiple 
-            expert sources. You ensure responses are comprehensive, well-organized, and address all aspects 
-            of complex technical questions.""",
-            verbose=False,
-            allow_delegation=True,
-            tools=self.tools,
-            llm=self.llm
-        )
+        try:
+            # Create document search tool
+            doc_search_tool = DocumentSearchTool(embeddings_manager=self.embeddings_manager)
+            self.tools = [doc_search_tool]
+            
+            # Data Vault Expert Agent
+            self.agents['data_vault_expert'] = Agent(
+                role='Data Vault 2.0 Expert',
+                goal='Provide accurate and detailed information about Data Vault 2.0 methodology, architecture, and best practices',
+                backstory="""You are a senior data architect with extensive experience in Data Vault 2.0 methodology. 
+                You understand hub, link, and satellite structures, temporal aspects, and business keys. You can explain 
+                complex data vault concepts in clear, actionable terms.""",
+                verbose=False,
+                allow_delegation=False,
+                tools=self.tools,
+                llm=self.llm
+            )
+            
+            # VaultSpeed Expert Agent
+            self.agents['vaultspeed_expert'] = Agent(
+                role='VaultSpeed Specialist',
+                goal='Provide expert guidance on VaultSpeed automation, configuration, and implementation',
+                backstory="""You are a VaultSpeed specialist with deep knowledge of automation tools, 
+                code generation, metadata management, and deployment strategies. You help teams implement 
+                efficient data vault solutions using VaultSpeed technology.""",
+                verbose=False,
+                allow_delegation=False,
+                tools=self.tools,
+                llm=self.llm
+            )
+            
+            # Airflow Expert Agent
+            self.agents['airflow_expert'] = Agent(
+                role='Apache Airflow Expert',
+                goal='Provide comprehensive guidance on Airflow orchestration, DAGs, and data pipeline management',
+                backstory="""You are an experienced data engineer specializing in Apache Airflow. You understand 
+                DAG design patterns, task dependencies, scheduling, monitoring, and integration with data vault systems. 
+                You provide practical solutions for complex orchestration challenges.""",
+                verbose=False,
+                allow_delegation=False,
+                tools=self.tools,
+                llm=self.llm
+            )
+            
+            print(f"Successfully created {len(self.agents)} agents")
+            
+        except Exception as e:
+            error_msg = f"Failed to setup agents: {str(e)}"
+            print(f"Agent setup error: {error_msg}")
+            self.initialization_error = error_msg
+            self.agents = {}
+            self.tools = []
     
     def _determine_relevant_agent(self, query: str) -> str:
-        """Determine which agent is most relevant for the query"""
+        """Determine the most relevant agent for the query"""
         query_lower = query.lower()
         
         if any(keyword in query_lower for keyword in ['vaultspeed', 'automation', 'code generation', 'metadata']):
             return 'vaultspeed_expert'
-        elif any(keyword in query_lower for keyword in ['airflow', 'dag', 'pipeline', 'orchestration', 'scheduling']):
+        elif any(keyword in query_lower for keyword in ['airflow', 'dag', 'orchestration', 'pipeline', 'scheduling']):
             return 'airflow_expert'
-        elif any(keyword in query_lower for keyword in ['data vault', 'hub', 'link', 'satellite', 'business key']):
-            return 'data_vault_expert'
         else:
             return 'data_vault_expert'  # Default to data vault expert
     
+    def get_document_topics(self) -> List[str]:
+        """Get extracted topics from uploaded documents"""
+        return self.embeddings_manager.get_document_topics()
+    
     def generate_response(self, query: str, mode: str = "Overview") -> tuple[str, List[str], Dict[str, Any]]:
         """Generate response using CrewAI agents"""
-        if not CREWAI_AVAILABLE or not self.llm or not self.agents:
-            return self._fallback_response(query, mode), [], {}
+        # Check if system is properly initialized
+        if not self.llm or not self.agents:
+            error_details = self.initialization_error or "Unknown initialization error"
+            return self._fallback_response(query, mode, error_details), [], {}
         
         try:
             # Determine the best agent for this query
@@ -508,26 +489,26 @@ class CrewAIRAGSystem:
             # Create task based on response mode
             if mode == "Overview":
                 task_description = f"""Analyze the user query: "{query}"
-            
-                First, use the document_search tool to find relevant information from the uploaded documents.
-                Then provide a concise overview response that includes:
-                1. Key points relevant to the query (use bullet points)
-                2. Brief explanations of important concepts
-                3. Practical recommendations if applicable
-            
-                Keep the response focused and easy to understand."""
+
+First, use the document_search tool to find relevant information from the uploaded documents.
+Then provide a concise overview response that includes:
+1. Key points relevant to the query (use bullet points)
+2. Brief explanations of important concepts
+3. Practical recommendations if applicable
+
+Keep the response focused and easy to understand."""
             else:  # Deep Dive
                 task_description = f"""Analyze the user query: "{query}"
-            
-                First, use the document_search tool to find comprehensive information from the uploaded documents.
-                Then provide a detailed deep-dive response that includes:
-                1. Detailed explanation of relevant concepts
-                2. Technical implementation details
-                3. Best practices and recommendations
-                4. Potential challenges and solutions
-                5. Integration considerations if applicable
-            
-                Provide thorough, technical depth while maintaining clarity."""
+
+First, use the document_search tool to find comprehensive information from the uploaded documents.
+Then provide a detailed deep-dive response that includes:
+1. Detailed explanation of relevant concepts
+2. Technical implementation details
+3. Best practices and recommendations
+4. Potential challenges and solutions
+5. Integration considerations if applicable
+
+Provide thorough, technical depth while maintaining clarity."""
             
             # Create and execute task
             task = Task(
@@ -544,8 +525,7 @@ class CrewAIRAGSystem:
                 process=Process.sequential
             )
             
-            with st.spinner("CrewAI agents processing..."):
-                result = crew.kickoff()
+            result = crew.kickoff()
             
             # Extract sources from the search results
             sources = self._extract_sources_from_search()
@@ -557,10 +537,11 @@ class CrewAIRAGSystem:
             }
             
             return str(result), sources, agent_info
-            
+        
         except Exception as e:
-            st.error(f"CrewAI execution error: {str(e)}")
-            return self._fallback_response(query, mode), [], {}
+            error_msg = f"CrewAI execution error: {str(e)}"
+            print(f"CrewAI execution error: {error_msg}")
+            return self._fallback_response(query, mode, error_msg), [], {}
     
     def _extract_sources_from_search(self) -> List[str]:
         """Extract sources from recent search operations"""
@@ -568,35 +549,55 @@ class CrewAIRAGSystem:
             return st.session_state.recent_sources
         return []
     
-    def _fallback_response(self, query: str, mode: str) -> str:
+    def _fallback_response(self, query: str, mode: str, error_details: str = None) -> str:
         """Fallback response when CrewAI is not available"""
-        if not CREWAI_AVAILABLE:
-            return f"""**CrewAI Not Available - Fallback Response**
-
-Your query: "{query}"
-
-**Issue**: CrewAI library is not installed or available in this environment.
-
-**To enable full CrewAI functionality:**
-1. Install required packages: `pip install crewai crewai-tools`
-2. Ensure your .env file contains: `GROQ_API_KEY=your_key_here`
-3. Restart the application
-
-**Current Status**: Operating in basic mode without specialized AI agents."""
-        
         if mode == "Overview":
-            return f"""**Overview Response for: "{query}"**
+            if error_details:
+                return f"""**CrewAI System Error**
 
-• **Configuration Required**: CrewAI system requires Groq API key in .env file
+Unfortunately, I encountered an issue while setting up the AI agents:
+
+**Error:** {error_details}
+
+**For your query:** "{query}"
+
+**Troubleshooting steps:**
+• Verify your Groq API key is valid and has credits
+• Check if the Groq service is accessible from your network
+• Try refreshing the page to reinitialize the system
+• Contact support if the issue persists
+
+*The system shows "Connected" but failed during agent initialization.*"""
+            else:
+                return f"""**Overview Response for: "{query}"**
+
+• **Configuration Required**: CrewAI system requires Groq API key
 • **Fallback Mode**: Currently operating in basic mode
 • **Expected Features**: With proper configuration, you'll get:
   - Expert agent analysis
   - Document-based responses
   - Specialized domain knowledge
 
-*Please ensure your .env file contains: GROQ_API_KEY=your_key_here*"""
+*Please ensure your Groq API key is properly configured in Streamlit secrets.*"""
         else:
-            return f"""**Deep Dive Analysis - Configuration Required**
+            if error_details:
+                return f"""**Deep Dive Analysis - System Error**
+
+**Query:** "{query}"
+
+**Issue:** {error_details}
+
+**Expected Functionality:**
+Our specialized CrewAI agents would normally process this using Groq's LLaMA 3:
+
+- **Data Vault Expert**: For questions about DV2.0 methodology, hubs, links, satellites
+- **VaultSpeed Specialist**: For automation, code generation, and tooling questions  
+- **Airflow Expert**: For orchestration, DAGs, and pipeline management
+
+**Resolution:**
+Please check your Groq API key configuration and try again. The connection test passed but agent setup failed."""
+            else:
+                return f"""**Deep Dive Analysis - Configuration Required**
 
 Your query "{query}" would normally be processed by our specialized CrewAI agents using Groq's LLaMA 3:
 
@@ -605,9 +606,7 @@ Your query "{query}" would normally be processed by our specialized CrewAI agent
 **Airflow Expert**: For orchestration, DAGs, and pipeline management
 
 **To enable full functionality:**
-1. Create a .env file in your project root
-2. Add your Groq API key: GROQ_API_KEY=your_key_here
-3. Restart the application
+Add your Groq API key to Streamlit secrets or environment variables.
 
 **Current Status**: Operating in fallback mode without agent-based analysis."""
 
@@ -659,9 +658,14 @@ class RAGChatbot:
             st.session_state.vectorstore_loaded = False
         return success
     
+    def get_document_topics(self) -> List[str]:
+        """Get extracted topics from uploaded documents"""
+        return self.embeddings_manager.get_document_topics()
+    
     def generate_response(self, query: str, mode: str = "Overview") -> tuple[str, List[str], Dict[str, Any]]:
         """Generate response using CrewAI RAG system"""
-        return self.crewai_system.generate_response(query, mode)
+        result = self.crewai_system.generate_response(query, mode)
+        return result
 
 def load_image_as_base64(image_path: str) -> str:
     """Load image and convert to base64 - supports both local and git paths"""
@@ -680,7 +684,8 @@ def load_image_as_base64(image_path: str) -> str:
         except Exception as e:
             continue
     
-    # If no paths work, return empty string (don't show warning in production)
+    # If no paths work, show warning but don't error
+    st.warning(f"Image not found at either: {local_path} or {git_path}")
     return ""
 
 def render_sidebar():
@@ -707,20 +712,22 @@ def render_sidebar():
         st.markdown("---")
         
         # Environment status
-        crewai_status = "✅ Available" if CREWAI_AVAILABLE else "❌ Not Installed"
         groq_key_status = "✅ Connected" if groq_key else "❌ Not Found"
-        vectorstore_status = f"✅ {VECTORSTORE_TYPE.upper()}" if VECTORSTORE_TYPE else "❌ Not Available"
-        
-        st.markdown(f"**CrewAI:** {crewai_status}")
         st.markdown(f"**Groq LLaMA 3:** {groq_key_status}")
-        st.markdown(f"**Vector Store:** {vectorstore_status}")
         
-        if not CREWAI_AVAILABLE:
-            st.warning("⚠️ Install CrewAI for full AI agent functionality")
+        # Show more detailed status
+        if groq_key and 'chatbot' in st.session_state:
+            crewai_system = st.session_state.chatbot.crewai_system
+            if crewai_system.llm and crewai_system.agents:
+                st.success("🤖 CrewAI Agents: Ready")
+            elif crewai_system.initialization_error:
+                st.error("🤖 CrewAI Agents: Failed")
+                st.caption(f"Error: {crewai_system.initialization_error[:50]}...")
+            else:
+                st.warning("🤖 CrewAI Agents: Initializing...")
+        
         if not groq_key:
-            st.warning("⚠️ Add GROQ_API_KEY to Streamlit Secrets or .env file")
-        if not VECTORSTORE_TYPE:
-            st.error("⚠️ No vector database available - install Chroma or FAISS")
+            st.warning("⚠️ Add GROQ_API_KEY to Streamlit Secrets for full functionality")
         
         st.markdown("---")
         
@@ -730,7 +737,7 @@ def render_sidebar():
         # Show current document status
         if st.session_state.get('documents_loaded', False):
             doc_count = st.session_state.get('document_count', 0)
-            st.success(f"✅ {doc_count} document chunks loaded & persisted")
+            st.success(f"✅ {doc_count} document chunks loaded")
             
             col1, col2 = st.columns(2)
             with col1:
@@ -742,7 +749,7 @@ def render_sidebar():
                         st.error("Failed to clear documents")
             
             with col2:
-                if st.button("📄 Add More Documents"):
+                if st.button("📤 Add More Documents"):
                     st.session_state.show_uploader = True
                     st.rerun()
         
@@ -752,7 +759,7 @@ def render_sidebar():
                 "Choose files to add",
                 type=['pdf', 'docx', 'txt'],
                 accept_multiple_files=True,
-                help="Upload PDF, DOCX, or TXT files. Documents are stored permanently until cleared.",
+                help="Upload PDF, DOCX, or TXT files.",
                 key="file_uploader"
             )
             
@@ -793,6 +800,10 @@ def render_sidebar():
             help="Display which CrewAI agent handled the query"
         )
         
+        # Document status
+        if st.session_state.get('documents_loaded', False):
+            st.info(f"📄 {st.session_state.get('document_count', 0)} chunks loaded")
+        
         return uploaded_files, response_mode, show_sources, show_agent_info
 
 def render_chat_message(message: ChatMessage, show_sources: bool = True, show_agent_info: bool = True):
@@ -812,24 +823,121 @@ def render_chat_message(message: ChatMessage, show_sources: bool = True, show_ag
             col1, col2 = st.columns([3, 1])
             with col1:
                 # Agent info header
-                agent_header = ""
                 if show_agent_info and message.agent_info:
                     agent_role = message.agent_info.get('agent_role', 'Quick Query')
                     mode = message.agent_info.get('mode', '')
-                    agent_header = f"<small><strong>🤖 {agent_role}</strong> • {mode} Mode</small><br>"
+                    st.markdown(f"<small><strong>🤖 {agent_role}</strong> • {mode} Mode</small>", unsafe_allow_html=True)
+                
+                # Clean the message content of any HTML tags for display
+                clean_content = message.content.replace('<strong>', '**').replace('</strong>', '**').replace('<br>', '\n').replace('<br/>', '\n').replace('<br />', '\n')
                 
                 st.markdown(f"""
                 <div style="background-color: #f5f5f5; padding: 15px; border-radius: 10px; margin: 10px 0; border-left: 4px solid #2196f3;">
-                    {agent_header}
-                    <strong>Quick Query:</strong><br>
-                    {message.content}
+                    <strong>Quick Query:</strong>
                 </div>
                 """, unsafe_allow_html=True)
+                
+                # Display the actual content using regular markdown
+                st.markdown(clean_content)
                 
                 if show_sources and message.sources:
                     st.markdown("**📚 Sources:**")
                     for source in message.sources:
                         st.markdown(f"• {source}")
+
+def render_topics_section(response_mode: str, show_sources: bool, show_agent_info: bool):
+    """Render the topics section based on uploaded documents"""
+    try:
+        if st.session_state.get('documents_loaded', False) and 'chatbot' in st.session_state:
+            # Check if the chatbot has the get_document_topics method
+            if hasattr(st.session_state.chatbot, 'get_document_topics'):
+                document_titles = st.session_state.chatbot.get_document_topics()
+            else:
+                # Fallback: try to get topics directly from embeddings manager
+                document_titles = getattr(st.session_state.chatbot.embeddings_manager, 'document_topics', [])
+            
+            if document_titles:
+                st.markdown("---")
+                st.markdown("### 📚 Your Uploaded Documents")
+                st.markdown("*Click on any document title to ask questions about it:*")
+                
+                # Display document titles in a nice grid layout
+                cols = st.columns(2)  # Use 2 columns for better layout with longer titles
+                for i, title in enumerate(document_titles):
+                    with cols[i % 2]:
+                        if st.button(f"📄 {title}", key=f"doc_{i}", help=f"Ask questions about: {title}"):
+                            # Auto-populate the chat input with a question about this document
+                            question = f"What is discussed in the document '{title}'?"
+                            st.session_state.auto_question = question
+                            st.rerun()
+            else:
+                st.markdown("---")
+                st.markdown("### 📚 Your Documents")
+                st.info("Upload documents to see them listed here for easy access!")
+        else:
+            st.markdown("---")
+            st.markdown("### 📚 Your Documents")
+            st.info("👆 Upload documents first to see them available for exploration!")
+    except Exception as e:
+        st.markdown("---")
+        st.markdown("### 📚 Your Documents") 
+        st.error(f"Error loading document list: {str(e)}")
+        st.info("👆 Upload documents first to see them available for exploration!")
+    
+    # Chat interface
+    chat_container = st.container()
+    
+    with chat_container:
+        # Display chat history
+        for message in st.session_state.chat_history:
+            render_chat_message(message, show_sources, show_agent_info)
+    
+    # Input area
+    with st.container():
+        if st.session_state.documents_loaded:
+            # Check for auto-generated questions from topic clicks
+            user_input = None
+            if hasattr(st.session_state, 'auto_question'):
+                user_input = st.session_state.auto_question
+                del st.session_state.auto_question
+            else:
+                # Chat input
+                user_input = st.chat_input("Ask a question about your documents...", key="main_chat_input")
+            
+            if user_input:
+                # Add user message to history
+                user_message = ChatMessage(
+                    role="user",
+                    content=user_input,
+                    timestamp=datetime.now()
+                )
+                st.session_state.chat_history.append(user_message)
+                
+                # Generate response
+                with st.spinner("CrewAI agents are analyzing your question..."):
+                    response_content, sources, agent_info = st.session_state.chatbot.generate_response(
+                        user_input, response_mode
+                    )
+                
+                # Add assistant message to history
+                assistant_message = ChatMessage(
+                    role="assistant",
+                    content=response_content,
+                    timestamp=datetime.now(),
+                    sources=sources if show_sources else None,
+                    agent_info=agent_info
+                )
+                st.session_state.chat_history.append(assistant_message)
+                
+                st.rerun()
+        else:
+            st.info("👆 Please upload documents using the sidebar to start chatting with CrewAI agents!")
+    
+    # Clear chat button
+    if st.session_state.chat_history:
+        if st.button("🗑️ Clear Chat History"):
+            st.session_state.chat_history = []
+            st.rerun()
 
 def main():
     """Main application function"""
@@ -842,7 +950,7 @@ def main():
     if 'chatbot' not in st.session_state:
         st.session_state.chatbot = RAGChatbot()
     
-    # Custom CSS with plain white header
+    # Custom CSS
     st.markdown("""
     <style>
     .main-header {
@@ -871,7 +979,7 @@ def main():
     </style>
     """, unsafe_allow_html=True)
     
-    # Render sidebar
+    # Render sidebar and get settings
     uploaded_files, response_mode, show_sources, show_agent_info = render_sidebar()
     
     # Main content area - Header with Quickquery.png
@@ -893,99 +1001,12 @@ def main():
     else:
         st.markdown('''
         <div class="main-header">
-            <h1>🔍 Find Answers Inside Your Documents</h1>
+            <h1>📚 Find Answers Inside Your Documents</h1>
         </div>
         ''', unsafe_allow_html=True)
     
-    # List of topics section
-    st.markdown("---")
-    st.markdown("### 📚 List of Topics Available for Search")
-    st.markdown("""
-    - Data Vault 2.0 Fundamentals  
-    - Hubs, Links, and Satellites  
-    - Business Keys and Surrogate Keys  
-    - Staging Layer Best Practices  
-    - PIT & Bridge Tables  
-    - Data Vault vs Dimensional Modeling  
-    - Automation in Data Vault  
-    - Agile Delivery with Data Vault  
-    """)
-    
-    # Chat interface
-    chat_container = st.container()
-    
-    with chat_container:
-        # Display chat history
-        for message in st.session_state.chat_history:
-            render_chat_message(message, show_sources, show_agent_info)
-    
-    # Input area
-    with st.container():
-        if st.session_state.documents_loaded:
-            # Chat input
-            user_input = st.chat_input("Ask a question about your documents...")
-            
-            if user_input:
-                # Add user message to history
-                user_message = ChatMessage(
-                    role="user",
-                    content=user_input,
-                    timestamp=datetime.now()
-                )
-                st.session_state.chat_history.append(user_message)
-                
-                # Generate response
-                if CREWAI_AVAILABLE and groq_key:
-                    spinner_text = "CrewAI agents are analyzing your question using Groq LLaMA 3..."
-                else:
-                    spinner_text = "Processing your question..."
-                    
-                with st.spinner(spinner_text):
-                    response_content, sources, agent_info = st.session_state.chatbot.generate_response(
-                        user_input, response_mode
-                    )
-                
-                # Add assistant message to history
-                assistant_message = ChatMessage(
-                    role="assistant",
-                    content=response_content,
-                    timestamp=datetime.now(),
-                    sources=sources if show_sources else None,
-                    agent_info=agent_info
-                )
-                st.session_state.chat_history.append(assistant_message)
-                
-                st.rerun()
-        else:
-            st.info("👆 Please upload documents using the sidebar to start chatting!")
-            
-            # Show status of requirements
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown("**System Status:**")
-                if CREWAI_AVAILABLE:
-                    st.success("✅ CrewAI Available")
-                else:
-                    st.error("❌ CrewAI Not Installed")
-                    
-                if groq_key:
-                    st.success("✅ Groq API Key Found")
-                else:
-                    st.error("❌ Groq API Key Missing")
-            
-            with col2:
-                st.markdown("**Quick Start:**")
-                st.markdown("1. Upload PDF/DOCX/TXT files")
-                st.markdown("2. Wait for processing")
-                st.markdown("3. Start asking questions!")
-    
-    # Clear chat button
-    if st.session_state.chat_history:
-        col1, col2, col3 = st.columns([1, 1, 1])
-        with col2:
-            if st.button("🗑️ Clear Chat History", use_container_width=True):
-                st.session_state.chat_history = []
-                st.rerun()
+    # Call the topics section with the required parameters
+    render_topics_section(response_mode, show_sources, show_agent_info)
 
 if __name__ == "__main__":
     main()
