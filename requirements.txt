@@ -1,20 +1,30 @@
+# Core Streamlit
 streamlit>=1.28.0
-crewai>=0.28.8
-langchain>=0.1.0
-langchain-groq>=0.1.0
-langchain-huggingface>=0.0.3
-langchain-community>=0.0.38
-langchain-openai>=0.1.0
-faiss-cpu>=1.7.4
+
+# Document Processing
 PyPDF2>=3.0.1
 python-docx>=0.8.11
+
+# LangChain Core
+langchain>=0.1.0
+langchain-community>=0.0.10
+langchain-groq>=0.0.3
+
+# Embeddings and Vector Store
 sentence-transformers>=2.2.2
+faiss-cpu>=1.7.4
 transformers>=4.21.0
-torch>=2.0.0,<2.3.0
+torch>=1.13.0
+
+# HuggingFace
+huggingface-hub>=0.16.4
+
+# Text Processing
+tiktoken>=0.5.1
+
+# Environment Management
+python-dotenv>=1.0.0
+
+# Utilities
 numpy>=1.24.0
-pysqlite3-binary>=0.5.0
-litellm>=1.0.0
-openai>=1.0.0
-tiktoken>=0.4.0
-accelerate>=0.20.0
-safetensors>=0.3.0
+pandas>=2.0.0
