@@ -2,11 +2,14 @@ import streamlit as st
 import tempfile
 import os
 import sys
+
+# Handle SQLite import for Streamlit Cloud
 try:
     import pysqlite3
     sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
 except ImportError:
     import sqlite3
+
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 from datetime import datetime
@@ -14,19 +17,32 @@ import base64
 import io
 import pickle
 
-# CrewAI and LLM imports
-from crewai import Agent, Task, Crew, Process
-from crewai.tools import BaseTool
-from langchain_groq import ChatGroq
-from langchain_huggingface import HuggingFaceEmbeddings
+# Import with error handling
+try:
+    # CrewAI and LLM imports
+    from crewai import Agent, Task, Crew, Process
+    from crewai.tools import BaseTool
+    from langchain_groq import ChatGroq
+    from langchain_huggingface import HuggingFaceEmbeddings
 
-# Document processing imports
-import PyPDF2
-import docx
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
-from langchain.schema import Document
-import numpy as np
+    # Document processing imports
+    import PyPDF2
+    import docx
+    from langchain.text_splitter import RecursiveCharacterTextSplitter
+    from langchain_community.vectorstores import FAISS
+    from langchain.schema import Document
+    import numpy as np
+    
+    IMPORTS_SUCCESSFUL = True
+    IMPORT_ERROR = None
+except ImportError as e:
+    IMPORTS_SUCCESSFUL = False
+    IMPORT_ERROR = str(e)
+    # Create placeholder classes to prevent further errors
+    class BaseTool:
+        pass
+    class Document:
+        pass
 
 # Configure page
 st.set_page_config(
@@ -35,6 +51,35 @@ st.set_page_config(
     layout="centered",
     initial_sidebar_state="expanded"
 )
+
+# Check imports at startup
+if not IMPORTS_SUCCESSFUL:
+    st.error(f"""
+    ❌ **Missing Dependencies**
+    
+    The following error occurred while importing required packages:
+    ```
+    {IMPORT_ERROR}
+    ```
+    
+    **To fix this issue:**
+    1. Ensure you have a `requirements.txt` file with all necessary dependencies
+    2. For Streamlit Cloud: Check that your requirements.txt is in the root directory
+    3. For local development: Run `pip install -r requirements.txt`
+    
+    **Required packages:**
+    - streamlit
+    - crewai
+    - langchain-groq
+    - langchain-huggingface
+    - langchain-community
+    - faiss-cpu
+    - PyPDF2
+    - python-docx
+    - sentence-transformers
+    - pysqlite3-binary
+    """)
+    st.stop()
 
 # API Key Configuration - Streamlit Cloud compatible
 def get_groq_api_key():
@@ -136,6 +181,16 @@ class DocumentProcessor:
         try:
             with open(file_path, 'r', encoding='utf-8') as file:
                 return file.read()
+        except UnicodeDecodeError:
+            # Try with different encodings
+            for encoding in ['latin-1', 'cp1252', 'iso-8859-1']:
+                try:
+                    with open(file_path, 'r', encoding=encoding) as file:
+                        return file.read()
+                except UnicodeDecodeError:
+                    continue
+            st.error(f"Could not decode text file with any common encoding")
+            return ""
         except Exception as e:
             st.error(f"Error processing TXT: {str(e)}")
             return ""
@@ -182,13 +237,14 @@ class EmbeddingsManager:
             chunk_overlap=200,
             length_function=len
         )
-        # Use HuggingFace embeddings
+        # Use HuggingFace embeddings with error handling
         try:
             self.embeddings = HuggingFaceEmbeddings(
                 model_name="sentence-transformers/all-MiniLM-L6-v2"
             )
         except Exception as e:
             st.error(f"Error initializing embeddings: {e}")
+            st.info("This might be due to missing dependencies or network issues.")
             self.embeddings = None
         
         # Try to load existing vectorstore from session state
@@ -239,13 +295,14 @@ class EmbeddingsManager:
         title = ' '.join(word.capitalize() for word in title.split())
         
         # Handle common abbreviations and acronyms
-        title = title.replace(' Api ', ' API ')
-        title = title.replace(' Sql ', ' SQL ')
-        title = title.replace(' Pdf ', ' PDF ')
-        title = title.replace(' Json ', ' JSON ')
-        title = title.replace(' Xml ', ' XML ')
-        title = title.replace(' Html ', ' HTML ')
-        title = title.replace(' Csv ', ' CSV ')
+        abbreviations = {
+            ' Api ': ' API ', ' Sql ': ' SQL ', ' Pdf ': ' PDF ',
+            ' Json ': ' JSON ', ' Xml ': ' XML ', ' Html ': ' HTML ',
+            ' Csv ': ' CSV ', ' Ai ': ' AI ', ' Ml ': ' ML '
+        }
+        
+        for abbr, replacement in abbreviations.items():
+            title = title.replace(abbr, replacement)
         
         return title
     
@@ -322,12 +379,9 @@ class EmbeddingsManager:
             self.document_topics = []
             
             # Clear from session state
-            if 'faiss_vectorstore' in st.session_state:
-                del st.session_state['faiss_vectorstore']
-            if 'documents_metadata' in st.session_state:
-                del st.session_state['documents_metadata']
-            if 'document_topics' in st.session_state:
-                del st.session_state['document_topics']
+            for key in ['faiss_vectorstore', 'documents_metadata', 'document_topics']:
+                if key in st.session_state:
+                    del st.session_state[key]
             
             return True
         except Exception as e:
@@ -346,61 +400,58 @@ class CrewAIRAGSystem:
         self.initialization_error = None
         
         if self.groq_api_key:
-            try:
-                # Try with explicit provider specification
-                from langchain_groq import ChatGroq
-                
-                # Method 1: Standard ChatGroq initialization
-                self.llm = ChatGroq(
+            self._initialize_llm_and_agents()
+        else:
+            self.initialization_error = "No Groq API key provided"
+    
+    def _initialize_llm_and_agents(self):
+        """Initialize LLM and CrewAI agents with improved error handling"""
+        try:
+            # Try different initialization methods
+            initialization_methods = [
+                lambda: ChatGroq(
                     groq_api_key=self.groq_api_key,
-                    model_name="groq/llama-3.1-8b-instant",  # Use model_name parameter
+                    model_name="groq/llama-3.1-8b-instant",
+                    temperature=0.7,
+                    max_tokens=1500
+                ),
+                lambda: ChatGroq(
+                    api_key=self.groq_api_key,
+                    model="groq/llama-3.1-8b-instant",
+                    temperature=0.7,
+                    max_tokens=1500
+                ),
+                lambda: ChatGroq(
+                    groq_api_key=self.groq_api_key,
+                    model_name="llama-3.1-8b-instant",
                     temperature=0.7,
                     max_tokens=1500
                 )
-                
-                # Test the connection with a simple prompt
-                print("Testing Groq connection...")
-                test_response = self.llm.invoke("Test")
-                print(f"Connection test successful: {test_response.content[:50]}...")
+            ]
+            
+            for i, method in enumerate(initialization_methods):
+                try:
+                    self.llm = method()
+                    # Test the connection
+                    test_response = self.llm.invoke("Test connection")
+                    print(f"Method {i+1} successful: {test_response.content[:50]}...")
+                    break
+                except Exception as e:
+                    print(f"Method {i+1} failed: {str(e)}")
+                    if i == len(initialization_methods) - 1:
+                        raise e
+                    continue
+            
+            # Setup agents if LLM initialization was successful
+            if self.llm:
                 self._setup_agents_and_tools()
                 print("CrewAI agents setup completed successfully")
-                
-            except Exception as e:
-                # Method 2: Try with different parameter names
-                try:
-                    print("Trying with different parameter configuration...")
-                    self.llm = ChatGroq(
-                        api_key=self.groq_api_key,  # Try api_key instead of groq_api_key
-                        model="groq/llama-3.1-8b-instant",
-                        temperature=0.7,
-                        max_tokens=1500
-                    )
-                    test_response = self.llm.invoke("Test")
-                    print(f"Second method successful: {test_response.content[:50]}...")
-                    self._setup_agents_and_tools()
-                    print("CrewAI agents setup completed with second method")
-                    
-                except Exception as e2:
-                    # Method 3: Try with CrewAI's LLM wrapper
-                    try:
-                        print("Trying with CrewAI LLM wrapper...")
-                        from crewai import LLM
-                        
-                        self.llm = LLM(
-                            model="groq/llama-3.1-8b-instant",
-                            api_key=self.groq_api_key
-                        )
-                        # Skip test for CrewAI LLM wrapper as it might not have invoke method
-                        self._setup_agents_and_tools()
-                        print("CrewAI agents setup completed with CrewAI LLM wrapper")
-                        
-                    except Exception as e3:
-                        error_msg = f"Failed with all methods: {str(e)} | {str(e2)} | {str(e3)}"
-                        print(f"CrewAI initialization error: {error_msg}")
-                        self.initialization_error = error_msg
-                        self.llm = None
-        else:
-            self.initialization_error = "No Groq API key provided"
+            
+        except Exception as e:
+            error_msg = f"CrewAI initialization failed: {str(e)}"
+            print(f"CrewAI initialization error: {error_msg}")
+            self.initialization_error = error_msg
+            self.llm = None
     
     def _setup_agents_and_tools(self):
         """Setup CrewAI agents and tools"""
@@ -670,22 +721,24 @@ class RAGChatbot:
 def load_image_as_base64(image_path: str) -> str:
     """Load image and convert to base64 - supports both local and git paths"""
     # Define possible paths
-    local_path = f"D:\\MOOD\\CODE\\{image_path}"
-    git_path = image_path
+    local_paths = [
+        f"D:\\MOOD\\CODE\\{image_path}",
+        image_path,
+        os.path.join("images", os.path.basename(image_path)),
+        os.path.join(".", image_path)
+    ]
     
-    # Try local path first, then git path
-    paths_to_try = [local_path, git_path]
-    
-    for path in paths_to_try:
+    # Try each path
+    for path in local_paths:
         try:
             if os.path.exists(path):
                 with open(path, "rb") as img_file:
                     return base64.b64encode(img_file.read()).decode()
-        except Exception as e:
+        except Exception:
             continue
     
     # If no paths work, show warning but don't error
-    st.warning(f"Image not found at either: {local_path} or {git_path}")
+    st.warning(f"Image not found at any expected location: {image_path}")
     return ""
 
 def render_sidebar():
@@ -975,6 +1028,24 @@ def main():
         bottom: 0;
         background: white;
         padding: 20px 0;
+    }
+    .stAlert {
+        margin: 10px 0;
+    }
+    .stSuccess {
+        background-color: #d4edda;
+        border-color: #c3e6cb;
+        color: #155724;
+    }
+    .stError {
+        background-color: #f8d7da;
+        border-color: #f5c6cb;
+        color: #721c24;
+    }
+    .stWarning {
+        background-color: #fff3cd;
+        border-color: #ffeaa7;
+        color: #856404;
     }
     </style>
     """, unsafe_allow_html=True)
