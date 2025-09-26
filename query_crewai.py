@@ -237,18 +237,107 @@ class EmbeddingsManager:
             chunk_overlap=200,
             length_function=len
         )
-        # Use HuggingFace embeddings with error handling
-        try:
-            self.embeddings = HuggingFaceEmbeddings(
-                model_name="sentence-transformers/all-MiniLM-L6-v2"
-            )
-        except Exception as e:
-            st.error(f"Error initializing embeddings: {e}")
-            st.info("This might be due to missing dependencies or network issues.")
-            self.embeddings = None
+        # Use HuggingFace embeddings with enhanced error handling
+        self.embeddings = self._initialize_embeddings()
         
         # Try to load existing vectorstore from session state
         self._load_existing_vectorstore()
+    
+    def _initialize_embeddings(self):
+        """Initialize embeddings with multiple fallback options"""
+        embedding_options = [
+            # Option 1: Standard HuggingFace embeddings
+            lambda: self._try_huggingface_embeddings("sentence-transformers/all-MiniLM-L6-v2"),
+            # Option 2: Alternative model
+            lambda: self._try_huggingface_embeddings("sentence-transformers/all-mpnet-base-v2"),
+            # Option 3: Smaller model
+            lambda: self._try_huggingface_embeddings("sentence-transformers/paraphrase-MiniLM-L3-v2"),
+            # Option 4: OpenAI embeddings (if available)
+            lambda: self._try_openai_embeddings(),
+            # Option 5: Fake embeddings for development/testing
+            lambda: self._create_fake_embeddings()
+        ]
+        
+        for i, embedding_method in enumerate(embedding_options):
+            try:
+                embeddings = embedding_method()
+                if embeddings:
+                    print(f"Embeddings initialized successfully with method {i+1}")
+                    return embeddings
+            except Exception as e:
+                print(f"Embeddings method {i+1} failed: {str(e)}")
+                continue
+        
+        st.error("All embedding initialization methods failed")
+        return None
+    
+    def _try_huggingface_embeddings(self, model_name: str):
+        """Try to initialize HuggingFace embeddings with specific configurations"""
+        try:
+            # Method 1: Standard initialization
+            return HuggingFaceEmbeddings(
+                model_name=model_name,
+                model_kwargs={'device': 'cpu'},
+                encode_kwargs={'normalize_embeddings': True}
+            )
+        except Exception as e1:
+            try:
+                # Method 2: With explicit cache directory
+                import tempfile
+                cache_dir = tempfile.mkdtemp()
+                return HuggingFaceEmbeddings(
+                    model_name=model_name,
+                    cache_folder=cache_dir,
+                    model_kwargs={'device': 'cpu', 'trust_remote_code': True},
+                    encode_kwargs={'normalize_embeddings': True}
+                )
+            except Exception as e2:
+                try:
+                    # Method 3: Force CPU and no meta tensors
+                    import torch
+                    torch.cuda.empty_cache() if torch.cuda.is_available() else None
+                    return HuggingFaceEmbeddings(
+                        model_name=model_name,
+                        model_kwargs={
+                            'device': 'cpu',
+                            'torch_dtype': torch.float32
+                        }
+                    )
+                except Exception as e3:
+                    raise Exception(f"All HuggingFace methods failed: {e1} | {e2} | {e3}")
+    
+    def _try_openai_embeddings(self):
+        """Try OpenAI embeddings as fallback"""
+        try:
+            # Only try if OpenAI key is available
+            openai_key = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY", None)
+            if not openai_key:
+                raise Exception("No OpenAI API key available")
+            
+            from langchain_openai import OpenAIEmbeddings
+            return OpenAIEmbeddings(
+                openai_api_key=openai_key,
+                model="text-embedding-3-small"
+            )
+        except ImportError:
+            raise Exception("OpenAI embeddings not available (missing langchain-openai)")
+        except Exception as e:
+            raise Exception(f"OpenAI embeddings failed: {e}")
+    
+    def _create_fake_embeddings(self):
+        """Create fake embeddings for development/testing"""
+        class FakeEmbeddings:
+            def embed_documents(self, texts):
+                # Create random embeddings of dimension 384 (same as MiniLM)
+                import numpy as np
+                return [np.random.rand(384).tolist() for _ in texts]
+            
+            def embed_query(self, text):
+                import numpy as np
+                return np.random.rand(384).tolist()
+        
+        st.warning("⚠️ Using fake embeddings for development. Search results will not be meaningful.")
+        return FakeEmbeddings()
     
     def _load_existing_vectorstore(self):
         """Try to load existing vectorstore from session state"""
