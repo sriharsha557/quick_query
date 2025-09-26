@@ -407,34 +407,42 @@ class CrewAIRAGSystem:
     def _initialize_llm_and_agents(self):
         """Initialize LLM and CrewAI agents with improved error handling"""
         try:
-            # Try different initialization methods
+            # Try different initialization methods with correct model formats
             initialization_methods = [
-                lambda: ChatGroq(
-                    groq_api_key=self.groq_api_key,
-                    model_name="groq/llama-3.1-8b-instant",
-                    temperature=0.7,
-                    max_tokens=1500
-                ),
-                lambda: ChatGroq(
-                    api_key=self.groq_api_key,
-                    model="groq/llama-3.1-8b-instant",
-                    temperature=0.7,
-                    max_tokens=1500
-                ),
+                # Method 1: Standard ChatGroq with correct model format
                 lambda: ChatGroq(
                     groq_api_key=self.groq_api_key,
                     model_name="llama-3.1-8b-instant",
                     temperature=0.7,
                     max_tokens=1500
-                )
+                ),
+                # Method 2: Using api_key parameter
+                lambda: ChatGroq(
+                    api_key=self.groq_api_key,
+                    model="llama-3.1-8b-instant",
+                    temperature=0.7,
+                    max_tokens=1500
+                ),
+                # Method 3: Try with different model name format
+                lambda: ChatGroq(
+                    groq_api_key=self.groq_api_key,
+                    model_name="llama3-8b-8192",
+                    temperature=0.7,
+                    max_tokens=1500
+                ),
+                # Method 4: CrewAI LLM wrapper approach
+                lambda: self._create_crewai_llm()
             ]
             
             for i, method in enumerate(initialization_methods):
                 try:
                     self.llm = method()
-                    # Test the connection
-                    test_response = self.llm.invoke("Test connection")
-                    print(f"Method {i+1} successful: {test_response.content[:50]}...")
+                    # Test the connection (skip for CrewAI LLM wrapper)
+                    if hasattr(self.llm, 'invoke'):
+                        test_response = self.llm.invoke("Test connection")
+                        print(f"Method {i+1} successful: {test_response.content[:50]}...")
+                    else:
+                        print(f"Method {i+1} successful: CrewAI LLM wrapper initialized")
                     break
                 except Exception as e:
                     print(f"Method {i+1} failed: {str(e)}")
@@ -452,6 +460,38 @@ class CrewAIRAGSystem:
             print(f"CrewAI initialization error: {error_msg}")
             self.initialization_error = error_msg
             self.llm = None
+    
+    def _create_crewai_llm(self):
+        """Create LLM using CrewAI's LLM wrapper"""
+        try:
+            from crewai import LLM
+            
+            # Try different model formats for CrewAI LLM
+            model_formats = [
+                "groq/llama-3.1-8b-instant",
+                "groq/llama3-8b-8192", 
+                "llama-3.1-8b-instant",
+                "llama3-8b-8192"
+            ]
+            
+            for model_name in model_formats:
+                try:
+                    llm = LLM(
+                        model=model_name,
+                        api_key=self.groq_api_key,
+                        temperature=0.7,
+                        max_tokens=1500
+                    )
+                    print(f"CrewAI LLM created successfully with model: {model_name}")
+                    return llm
+                except Exception as e:
+                    print(f"CrewAI LLM failed with model {model_name}: {str(e)}")
+                    continue
+            
+            raise Exception("All CrewAI LLM model formats failed")
+            
+        except ImportError:
+            raise Exception("CrewAI LLM class not available")
     
     def _setup_agents_and_tools(self):
         """Setup CrewAI agents and tools"""
